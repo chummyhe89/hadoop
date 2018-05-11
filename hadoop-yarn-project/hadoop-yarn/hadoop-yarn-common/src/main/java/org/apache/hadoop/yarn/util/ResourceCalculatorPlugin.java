@@ -25,6 +25,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.SysInfo;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 
 /**
  * Plugin to calculate resource information on the system.
@@ -120,12 +121,21 @@ public class ResourceCalculatorPlugin extends Configured {
   }
 
   /**
-   * Obtain the CPU usage % of the machine. Return -1 if it is unavailable
+   * Obtain the CPU usage % of the machine. Return -1 if it is unavailable.
    *
    * @return CPU usage in %
    */
-  public float getCpuUsage() {
-    return sys.getCpuUsage();
+  public float getCpuUsagePercentage() {
+    return sys.getCpuUsagePercentage();
+  }
+
+  /**
+   * Obtain the number of VCores used. Return -1 if it is unavailable.
+   *
+   * @return Number of VCores used a percentage (from 0 to #VCores)
+   */
+  public float getNumVCoresUsed() {
+    return sys.getNumVCoresUsed();
   }
 
    /**
@@ -180,10 +190,51 @@ public class ResourceCalculatorPlugin extends Configured {
     }
     try {
       return new ResourceCalculatorPlugin();
+    } catch (UnsupportedOperationException ue) {
+      LOG.warn("Failed to instantiate default resource calculator. "
+          + ue.getMessage());
     } catch (Throwable t) {
       LOG.warn(t + ": Failed to instantiate default resource calculator.", t);
     }
     return null;
+  }
+
+  /**
+   * Create the ResourceCalculatorPlugin for the containers monitor in the Node
+   * Manager and configure it. If the plugin is not configured, this method
+   * will try and return a memory calculator plugin available for this system.
+   *
+   * @param conf Configure the plugin with this.
+   * @return ResourceCalculatorPlugin or null if ResourceCalculatorPlugin is
+   *         not available for current system.
+   */
+  public static ResourceCalculatorPlugin getContainersMonitorPlugin(
+      Configuration conf) {
+    Class<? extends ResourceCalculatorPlugin> clazzNM = conf.getClass(
+        YarnConfiguration.NM_MON_RESOURCE_CALCULATOR, null,
+        ResourceCalculatorPlugin.class);
+    Class<? extends ResourceCalculatorPlugin> clazz = conf.getClass(
+        YarnConfiguration.NM_CONTAINER_MON_RESOURCE_CALCULATOR, clazzNM,
+        ResourceCalculatorPlugin.class);
+    return ResourceCalculatorPlugin.getResourceCalculatorPlugin(clazz, conf);
+  }
+
+  /**
+   * Create the ResourceCalculatorPlugin for the node resource monitor in the
+   * Node Manager and configure it. If the plugin is not configured, this
+   * method will try and return a memory calculator plugin available for this
+   * system.
+   *
+   * @param conf Configure the plugin with this.
+   * @return ResourceCalculatorPlugin or null if ResourceCalculatorPlugin is
+   *         not available for current system.
+   */
+  public static ResourceCalculatorPlugin getNodeResourceMonitorPlugin(
+      Configuration conf) {
+    Class<? extends ResourceCalculatorPlugin> clazz = conf.getClass(
+        YarnConfiguration.NM_MON_RESOURCE_CALCULATOR, null,
+        ResourceCalculatorPlugin.class);
+    return ResourceCalculatorPlugin.getResourceCalculatorPlugin(clazz, conf);
   }
 
 }

@@ -51,6 +51,7 @@ public class TestEpochsAreUnique {
   public void testSingleThreaded() throws IOException {
     Configuration conf = new Configuration();
     MiniJournalCluster cluster = new MiniJournalCluster.Builder(conf).build();
+    cluster.waitActive();
     URI uri = cluster.getQuorumJournalURI(JID);
     QuorumJournalManager qjm = new QuorumJournalManager(
         conf, uri, FAKE_NSINFO);
@@ -106,9 +107,9 @@ public class TestEpochsAreUnique {
   private class FaultyLoggerFactory implements AsyncLogger.Factory {
     @Override
     public AsyncLogger createLogger(Configuration conf, NamespaceInfo nsInfo,
-        String journalId, InetSocketAddress addr) {
+        String journalId, String nameServiceId, InetSocketAddress addr) {
       AsyncLogger ch = IPCLoggerChannel.FACTORY.createLogger(
-          conf, nsInfo, journalId, addr);
+          conf, nsInfo, journalId, nameServiceId, addr);
       AsyncLogger spy = Mockito.spy(ch);
       Mockito.doAnswer(new SometimesFaulty<Long>(0.10f))
           .when(spy).getJournalState();

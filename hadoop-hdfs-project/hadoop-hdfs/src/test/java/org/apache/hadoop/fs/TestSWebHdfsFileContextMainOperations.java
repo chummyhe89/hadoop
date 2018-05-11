@@ -24,6 +24,7 @@ import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.ssl.KeyStoreTestUtil;
 import org.apache.hadoop.security.ssl.SSLFactory;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 
@@ -50,14 +51,11 @@ public class TestSWebHdfsFileContextMainOperations
 
   private static final HdfsConfiguration CONF = new HdfsConfiguration();
 
-  private static final String BASEDIR =
-      System.getProperty("test.build.dir", "target/test-dir") + "/"
-          + TestSWebHdfsFileContextMainOperations.class.getSimpleName();
+  private static final String BASEDIR = GenericTestUtils
+      .getTempPath(TestSWebHdfsFileContextMainOperations.class.getSimpleName());
   protected static int numBlocks = 2;
   protected static final byte[] data = getFileData(numBlocks,
       getDefaultBlockSize());
-
-  private static Configuration sslConf;
 
   @BeforeClass
   public static void clusterSetupAtBeginning()
@@ -67,15 +65,18 @@ public class TestSWebHdfsFileContextMainOperations
     FileUtil.fullyDelete(base);
     base.mkdirs();
     keystoresDir = new File(BASEDIR).getAbsolutePath();
-    sslConf = new Configuration();
-
     try {
       sslConfDir = KeyStoreTestUtil
           .getClasspathDir(TestSWebHdfsFileContextMainOperations.class);
-      KeyStoreTestUtil.setupSSLConfig(keystoresDir, sslConfDir, sslConf, false);
+      KeyStoreTestUtil.setupSSLConfig(keystoresDir, sslConfDir, CONF, false);
+      CONF.set(DFSConfigKeys.DFS_CLIENT_HTTPS_KEYSTORE_RESOURCE_KEY,
+          KeyStoreTestUtil.getClientSSLConfigFileName());
+      CONF.set(DFSConfigKeys.DFS_SERVER_HTTPS_KEYSTORE_RESOURCE_KEY,
+          KeyStoreTestUtil.getServerSSLConfigFileName());
     } catch (Exception ex) {
       throw new RuntimeException(ex);
     }
+
     CONF.set(DFSConfigKeys.DFS_HTTP_POLICY_KEY, "HTTPS_ONLY");
     CONF.set(DFSConfigKeys.DFS_NAMENODE_HTTPS_ADDRESS_KEY, "localhost:0");
     CONF.set(DFSConfigKeys.DFS_DATANODE_HTTPS_ADDRESS_KEY, "localhost:0");
@@ -91,6 +92,11 @@ public class TestSWebHdfsFileContextMainOperations
         "/user/" + UserGroupInformation.getCurrentUser().getShortUserName()));
     fc.mkdir(defaultWorkingDirectory, FileContext.DEFAULT_PERM, true);
 
+  }
+
+  @Override
+  protected FileContextTestHelper createFileContextHelper() {
+    return new FileContextTestHelper("/tmp/TestSWebHdfsFileContextMainOperations");
   }
 
   @Override

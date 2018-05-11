@@ -22,8 +22,8 @@ package org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.privile
 
 import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.lang.StringUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -46,7 +46,8 @@ import java.util.Map;
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 public class PrivilegedOperationExecutor {
-  private static final Log LOG = LogFactory.getLog(PrivilegedOperationExecutor
+  private static final Logger LOG =
+       LoggerFactory.getLogger(PrivilegedOperationExecutor
       .class);
   private volatile static PrivilegedOperationExecutor instance;
 
@@ -133,18 +134,19 @@ public class PrivilegedOperationExecutor {
    * @param workingDir     (optional) working directory for execution
    * @param env            (optional) env of the command will include specified vars
    * @param grabOutput     return (possibly large) shell command output
+   * @param inheritParentEnv inherit the env vars from the parent process
    * @return stdout contents from shell executor - useful for some privileged
    * operations - e.g --tc_read
    * @throws org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.privileged.PrivilegedOperationException
    */
   public String executePrivilegedOperation(List<String> prefixCommands,
       PrivilegedOperation operation, File workingDir,
-      Map<String, String> env, boolean grabOutput)
+      Map<String, String> env, boolean grabOutput, boolean inheritParentEnv)
       throws PrivilegedOperationException {
     String[] fullCommandArray = getPrivilegedOperationExecutionCommand
         (prefixCommands, operation);
     ShellCommandExecutor exec = new ShellCommandExecutor(fullCommandArray,
-        workingDir, env);
+        workingDir, env, 0L, inheritParentEnv);
 
     try {
       exec.execute();
@@ -155,12 +157,22 @@ public class PrivilegedOperationExecutor {
         LOG.debug(exec.getOutput());
       }
     } catch (ExitCodeException e) {
-      String logLine = new StringBuffer("Shell execution returned exit code: ")
-          .append(exec.getExitCode())
-          .append(". Privileged Execution Operation Output: ")
-          .append(System.lineSeparator()).append(exec.getOutput()).toString();
+      if (operation.isFailureLoggingEnabled()) {
+        StringBuilder logBuilder = new StringBuilder("Shell execution returned "
+            + "exit code: ")
+            .append(exec.getExitCode())
+            .append(". Privileged Execution Operation Stderr: ")
+            .append(System.lineSeparator())
+            .append(e.getMessage())
+            .append(System.lineSeparator())
+            .append("Stdout: " + exec.getOutput())
+            .append(System.lineSeparator());
+        logBuilder.append("Full command array for failed execution: ")
+            .append(System.lineSeparator());
+        logBuilder.append(Arrays.toString(fullCommandArray));
 
-      LOG.warn(logLine);
+        LOG.warn(logBuilder.toString());
+      }
 
       //stderr from shell executor seems to be stuffed into the exception
       //'message' - so, we have to extract it and set it as the error out
@@ -191,7 +203,8 @@ public class PrivilegedOperationExecutor {
    */
   public String executePrivilegedOperation(PrivilegedOperation operation,
       boolean grabOutput) throws PrivilegedOperationException {
-    return executePrivilegedOperation(null, operation, null, null, grabOutput);
+    return executePrivilegedOperation(null, operation, null, null, grabOutput,
+        false);
   }
 
   //Utility functions for squashing together operations in supported ways

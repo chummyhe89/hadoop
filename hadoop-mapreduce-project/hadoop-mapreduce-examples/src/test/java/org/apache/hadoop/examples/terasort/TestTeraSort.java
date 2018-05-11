@@ -20,30 +20,37 @@ package org.apache.hadoop.examples.terasort;
 import java.io.File;
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.FileAlreadyExistsException;
 import org.apache.hadoop.mapred.HadoopTestCase;
 import org.apache.hadoop.util.ToolRunner;
+import org.junit.After;
+import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
+
 public class TestTeraSort extends HadoopTestCase {
-  private static Log LOG = LogFactory.getLog(TestTeraSort.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestTeraSort.class);
   
   public TestTeraSort()
       throws IOException {
     super(LOCAL_MR, LOCAL_FS, 1, 1);
   }
 
-  protected void tearDown() throws Exception {
-    getFileSystem().delete(new Path(TEST_DIR), true);
+  @After
+  public void tearDown() throws Exception {
+    getFileSystem().delete(TEST_DIR, true);
     super.tearDown();
   }
   
   // Input/Output paths for sort
-  private static final String TEST_DIR = 
-    new File(System.getProperty("test.build.data", "/tmp"), "terasort")
-    .getAbsolutePath();
+  private static final Path TEST_DIR = new Path(new File(
+    System.getProperty("test.build.data", "/tmp"), "terasort")
+    .getAbsoluteFile().toURI().toString());
   private static final Path SORT_INPUT_PATH = new Path(TEST_DIR, "sortin");
   private static final Path SORT_OUTPUT_PATH = new Path(TEST_DIR, "sortout");
   private static final Path TERA_OUTPUT_PATH = new Path(TEST_DIR, "validate");
@@ -76,6 +83,7 @@ public class TestTeraSort extends HadoopTestCase {
     assertEquals(ToolRunner.run(job, new TeraValidate(), svArgs), 0);
   }
 
+  @Test
   public void testTeraSort() throws Exception {
     // Run TeraGen to generate input for 'terasort'
     runTeraGen(createJobConf(), SORT_INPUT_PATH);
@@ -104,6 +112,7 @@ public class TestTeraSort extends HadoopTestCase {
       TERA_OUTPUT_PATH);
   }
 
+  @Test
   public void testTeraSortWithLessThanTwoArgs() throws Exception {
     String[] args = new String[1];
     assertEquals(new TeraSort().run(args), 2);

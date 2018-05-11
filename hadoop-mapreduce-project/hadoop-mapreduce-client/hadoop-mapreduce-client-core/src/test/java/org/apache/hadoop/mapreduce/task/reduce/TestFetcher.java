@@ -25,10 +25,9 @@ import java.net.HttpURLConnection;
 import org.apache.hadoop.fs.ChecksumException;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.mapred.MapOutputFile;
 import org.apache.hadoop.mapreduce.MRJobConfig;
-import org.apache.hadoop.mapreduce.TaskID;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.rules.TestName;
@@ -48,8 +47,6 @@ import java.util.ArrayList;
 
 import javax.crypto.SecretKey;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.Counters;
 import org.apache.hadoop.mapred.IFileInputStream;
@@ -64,14 +61,14 @@ import org.apache.hadoop.util.Time;
 import org.junit.Test;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
-
-import com.nimbusds.jose.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test that the Fetcher does what we expect it to.
  */
 public class TestFetcher {
-  private static final Log LOG = LogFactory.getLog(TestFetcher.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestFetcher.class);
   JobConf job = null;
   JobConf jobWithRetry = null;
   TaskAttemptID id = null;
@@ -173,6 +170,27 @@ public class TestFetcher {
     verify(ss).copyFailed(map1ID, host, false, false);
     verify(ss).copyFailed(map2ID, host, false, false);
     
+    verify(ss).putBackKnownMapOutput(any(MapHost.class), eq(map1ID));
+    verify(ss).putBackKnownMapOutput(any(MapHost.class), eq(map2ID));
+  }
+
+  @Test
+  public void testCopyFromHostConnectionRejected() throws Exception {
+    when(connection.getResponseCode())
+        .thenReturn(Fetcher.TOO_MANY_REQ_STATUS_CODE);
+
+    Fetcher<Text, Text> fetcher = new FakeFetcher<>(job, id, ss, mm, r, metrics,
+        except, key, connection);
+    fetcher.copyFromHost(host);
+
+    Assert.assertEquals("No host failure is expected.",
+        ss.hostFailureCount(host.getHostName()), 0);
+    Assert.assertEquals("No fetch failure is expected.",
+        ss.fetchFailureCount(map1ID), 0);
+    Assert.assertEquals("No fetch failure is expected.",
+        ss.fetchFailureCount(map2ID), 0);
+
+    verify(ss).penalize(eq(host), anyLong());
     verify(ss).putBackKnownMapOutput(any(MapHost.class), eq(map1ID));
     verify(ss).putBackKnownMapOutput(any(MapHost.class), eq(map2ID));
   }
@@ -346,6 +364,43 @@ public class TestFetcher {
   
   @SuppressWarnings("unchecked")
   @Test(timeout=10000) 
+  public void testCopyFromHostOnAnyException() throws Exception {
+    InMemoryMapOutput<Text, Text> immo = mock(InMemoryMapOutput.class);
+
+    Fetcher<Text,Text> underTest = new FakeFetcher<Text,Text>(job, id, ss, mm,
+        r, metrics, except, key, connection);
+
+    String replyHash = SecureShuffleUtils.generateHash(encHash.getBytes(), key);
+
+    when(connection.getResponseCode()).thenReturn(200);
+    when(connection.getHeaderField(
+        SecureShuffleUtils.HTTP_HEADER_REPLY_URL_HASH)).thenReturn(replyHash);
+    ShuffleHeader header = new ShuffleHeader(map1ID.toString(), 10, 10, 1);
+    ByteArrayOutputStream bout = new ByteArrayOutputStream();
+    header.write(new DataOutputStream(bout));
+    ByteArrayInputStream in = new ByteArrayInputStream(bout.toByteArray());
+    when(connection.getInputStream()).thenReturn(in);
+    when(connection.getHeaderField(ShuffleHeader.HTTP_HEADER_NAME))
+        .thenReturn(ShuffleHeader.DEFAULT_HTTP_HEADER_NAME);
+    when(connection.getHeaderField(ShuffleHeader.HTTP_HEADER_VERSION))
+        .thenReturn(ShuffleHeader.DEFAULT_HTTP_HEADER_VERSION);
+    when(mm.reserve(any(TaskAttemptID.class), anyLong(), anyInt()))
+        .thenReturn(immo);
+
+    doThrow(new ArrayIndexOutOfBoundsException()).when(immo)
+        .shuffle(any(MapHost.class), any(InputStream.class), anyLong(),
+            anyLong(), any(ShuffleClientMetrics.class), any(Reporter.class));
+
+    underTest.copyFromHost(host);
+
+    verify(connection)
+        .addRequestProperty(SecureShuffleUtils.HTTP_HEADER_URL_HASH,
+          encHash);
+    verify(ss, times(1)).copyFailed(map1ID, host, true, false);
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test(timeout=10000)
   public void testCopyFromHostWithRetry() throws Exception {
     InMemoryMapOutput<Text, Text> immo = mock(InMemoryMapOutput.class);
     ss = mock(ShuffleSchedulerImpl.class);
@@ -416,7 +471,10 @@ public class TestFetcher {
 
     underTest.copyFromHost(host);
     verify(allErrs).increment(1);
-    verify(ss).copyFailed(map1ID, host, false, false);
+    verify(ss, times(1)).copyFailed(map1ID, host, false, false);
+    verify(ss, times(1)).copyFailed(map2ID, host, false, false);
+    verify(ss, times(1)).putBackKnownMapOutput(any(MapHost.class), eq(map1ID));
+    verify(ss, times(1)).putBackKnownMapOutput(any(MapHost.class), eq(map2ID));
   }
 
   @Test

@@ -35,8 +35,6 @@ import java.io.PrintWriter;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
@@ -46,15 +44,19 @@ import org.apache.hadoop.mapreduce.v2.app.MockJobs;
 import org.apache.hadoop.mapreduce.v2.app.webapp.TestAMWebApp;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.webapp.View;
 import org.apache.hadoop.yarn.webapp.log.AggregatedLogsPage;
 import org.apache.hadoop.yarn.webapp.test.WebAppTests;
+import org.junit.Assert;
 import org.junit.Test;
 
 import com.google.inject.AbstractModule;
 import com.google.inject.Injector;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class TestHSWebApp {
-  private static final Log LOG = LogFactory.getLog(TestHSWebApp.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestHSWebApp.class);
 
   @Test public void testAppControllerIndex() {
     MockAppContext ctx = new MockAppContext(0, 1, 1, 1);
@@ -81,12 +83,36 @@ public class TestHSWebApp {
   }
 
   @Test
+  public void testTasksViewNaturalSortType() {
+    LOG.info("HsTasksPage");
+    AppContext appContext = new MockAppContext(0, 1, 1, 1);
+    Map<String, String> params = TestAMWebApp.getTaskParams(appContext);
+    Injector testPage = WebAppTests.testPage(HsTasksPage.class, AppContext.class, appContext, params);
+    View viewInstance = testPage.getInstance(HsTasksPage.class);
+    Map<String, String> moreParams = viewInstance.context().requestContext().moreParams();
+    String appTableColumnsMeta = moreParams.get("ui.dataTables.selector.init");
+    Assert.assertTrue(appTableColumnsMeta.indexOf("natural") != -1);
+  }
+
+  @Test
   public void testTaskView() {
     LOG.info("HsTaskPage");
     AppContext appContext = new MockAppContext(0, 1, 1, 1);
     Map<String, String> params = TestAMWebApp.getTaskParams(appContext);
     WebAppTests
         .testPage(HsTaskPage.class, AppContext.class, appContext, params);
+  }
+
+  @Test
+  public void testTaskViewNaturalSortType() {
+    LOG.info("HsTaskPage");
+    AppContext appContext = new MockAppContext(0, 1, 1, 1);
+    Map<String, String> params = TestAMWebApp.getTaskParams(appContext);
+    Injector testPage = WebAppTests.testPage(HsTaskPage.class, AppContext.class, appContext, params);
+    View viewInstance = testPage.getInstance(HsTaskPage.class);
+    Map<String, String> moreParams = viewInstance.context().requestContext().moreParams();
+    String appTableColumnsMeta = moreParams.get("ui.dataTables.attempts.init");
+    Assert.assertTrue(appTableColumnsMeta.indexOf("natural") != -1);
   }
 
   @Test public void testAttemptsWithJobView() {

@@ -99,6 +99,16 @@ public interface ApplicationConstants {
   public static final String STDOUT = "stdout";
 
   /**
+   * The type of launch for the container.
+   */
+  @Public
+  @Unstable
+  enum ContainerLaunchType {
+    LAUNCH,
+    RELAUNCH
+  }
+
+  /**
    * Environment for Applications.
    *
    * Some of the environment variables for applications are <em>final</em>
@@ -223,6 +233,12 @@ public interface ApplicationConstants {
     LOCAL_DIRS("LOCAL_DIRS"),
 
     /**
+     * $LOCAL_USER_DIRS
+     * Final, exported by NodeManager and non-modifiable by users.
+     */
+    LOCAL_USER_DIRS("LOCAL_USER_DIRS"),
+
+    /**
      * $LOG_DIRS
      * Final, exported by NodeManager and non-modifiable by users.
      * Comma separate list of directories that the container should use for
@@ -250,6 +266,7 @@ public interface ApplicationConstants {
      * Note: Use $$() method for cross-platform practice i.e. submit an
      * application from a Windows client to a Linux/Unix server or vice versa.
      * </p>
+     * @return expanded environment variable.
      */
     public String $() {
       if (Shell.WINDOWS) {
@@ -265,6 +282,7 @@ public interface ApplicationConstants {
      * expansion marker ('%' for Windows and '$' for Linux) by NodeManager on
      * container launch. For example: {{VAR}} will be replaced as $VAR on Linux,
      * and %VAR% on Windows.
+     * @return expanded environment variable.
      */
     @Public
     @Unstable

@@ -59,7 +59,7 @@ import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ReadOpChecksumIn
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.Status;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
 import org.apache.hadoop.hdfs.server.datanode.CachingStrategy;
-import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
+import org.apache.hadoop.hdfs.server.datanode.InternalDataNodeTestUtils;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.util.DataChecksum;
@@ -133,7 +133,7 @@ public class TestDataTransferProtocol {
       LOG.info("Expected: " + expected);
       
       if (eofExpected) {
-        throw new IOException("Did not recieve IOException when an exception " +
+        throw new IOException("Did not receive IOException when an exception " +
                               "is expected while reading from " + datanode); 
       }
       assertEquals(expected, received);
@@ -209,7 +209,7 @@ public class TestDataTransferProtocol {
     try {
       cluster.waitActive();
       String poolId = cluster.getNamesystem().getBlockPoolId(); 
-      datanode = DataNodeTestUtils.getDNRegistrationForBP(
+      datanode = InternalDataNodeTestUtils.getDNRegistrationForBP(
           cluster.getDataNodes().get(0), poolId);
       dnAddr = NetUtils.createSocketAddr(datanode.getXferAddr());
       FileSystem fileSys = cluster.getFileSystem();
@@ -559,6 +559,7 @@ public class TestDataTransferProtocol {
         BlockTokenSecretManager.DUMMY_TOKEN, "cl",
         new DatanodeInfo[1], new StorageType[1], null, stage,
         0, block.getNumBytes(), block.getNumBytes(), newGS,
-        checksum, CachingStrategy.newDefaultStrategy(), false, false, null);
+        checksum, CachingStrategy.newDefaultStrategy(), false, false,
+        null, null, new String[0]);
   }
 }

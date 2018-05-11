@@ -24,7 +24,6 @@ import static org.junit.Assert.fail;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
-import java.util.List;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
@@ -82,6 +81,7 @@ public class TestSnapshotRename {
   public void tearDown() throws Exception {
     if (cluster != null) {
       cluster.shutdown();
+      cluster = null;
     }
   }
   
@@ -100,7 +100,7 @@ public class TestSnapshotRename {
     for (int i = 0; i < listByName.size(); i++) {
       assertEquals(sortedNames[i], listByName.get(i).getRoot().getLocalName());
     }
-    List<DirectoryDiff> listByTime = srcRoot.getDiffs().asList();
+    DiffList<DirectoryDiff> listByTime = srcRoot.getDiffs().asList();
     assertEquals(names.length, listByTime.size());
     for (int i = 0; i < listByTime.size(); i++) {
       Snapshot s = srcRoot.getDirectorySnapshottableFeature().getSnapshotById(
@@ -183,6 +183,22 @@ public class TestSnapshotRename {
     exception.expectMessage(error);
     hdfs.renameSnapshot(sub1, "wrongName", "s2");
   }
+
+  /**
+   * Test rename a non-existing snapshot to itself.
+   */
+  @Test (timeout=60000)
+  public void testRenameNonExistingSnapshotToItself() throws Exception {
+    DFSTestUtil.createFile(hdfs, file1, BLOCKSIZE, REPLICATION, seed);
+    // Create snapshot for sub1
+    SnapshotTestHelper.createSnapshot(hdfs, sub1, "s1");
+
+    exception.expect(SnapshotException.class);
+    String error = "The snapshot wrongName does not exist for directory "
+        + sub1.toString();
+    exception.expectMessage(error);
+    hdfs.renameSnapshot(sub1, "wrongName", "wrongName");
+  }
   
   /**
    * Test rename a snapshot to another existing snapshot 
@@ -237,24 +253,31 @@ public class TestSnapshotRename {
   public void testRenameSnapshotCommandWithIllegalArguments() throws Exception {
     ByteArrayOutputStream out = new ByteArrayOutputStream();
     PrintStream psOut = new PrintStream(out);
-    System.setOut(psOut);
-    System.setErr(psOut);
-    FsShell shell = new FsShell();
-    shell.setConf(conf);
-    
-    String[] argv1 = {"-renameSnapshot", "/tmp", "s1"};
-    int val = shell.run(argv1);
-    assertTrue(val == -1);
-    assertTrue(out.toString().contains(
-        argv1[0] + ": Incorrect number of arguments."));
-    out.reset();
-    
-    String[] argv2 = {"-renameSnapshot", "/tmp", "s1", "s2", "s3"};
-    val = shell.run(argv2);
-    assertTrue(val == -1);
-    assertTrue(out.toString().contains(
-        argv2[0] + ": Incorrect number of arguments."));
-    psOut.close();
-    out.close();
+    PrintStream oldOut = System.out;
+    PrintStream oldErr = System.err;
+    try {
+      System.setOut(psOut);
+      System.setErr(psOut);
+      FsShell shell = new FsShell();
+      shell.setConf(conf);
+
+      String[] argv1 = { "-renameSnapshot", "/tmp", "s1" };
+      int val = shell.run(argv1);
+      assertTrue(val == -1);
+      assertTrue(out.toString()
+          .contains(argv1[0] + ": Incorrect number of arguments."));
+      out.reset();
+
+      String[] argv2 = { "-renameSnapshot", "/tmp", "s1", "s2", "s3" };
+      val = shell.run(argv2);
+      assertTrue(val == -1);
+      assertTrue(out.toString()
+          .contains(argv2[0] + ": Incorrect number of arguments."));
+      psOut.close();
+      out.close();
+    } finally {
+      System.setOut(oldOut);
+      System.setErr(oldErr);
+    }
   }
 }

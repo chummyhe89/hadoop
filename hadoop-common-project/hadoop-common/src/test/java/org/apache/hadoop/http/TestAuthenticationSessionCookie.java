@@ -19,9 +19,10 @@ import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
 import org.apache.hadoop.security.ssl.KeyStoreTestUtil;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.After;
 import org.junit.Test;
-import org.mortbay.log.Log;
+import org.eclipse.jetty.util.log.Log;
 
 import javax.servlet.*;
 import javax.servlet.http.HttpServletResponse;
@@ -32,11 +33,12 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
 import java.net.HttpCookie;
+import java.util.HashMap;
 import java.util.List;
 
 public class TestAuthenticationSessionCookie {
-  private static final String BASEDIR = System.getProperty("test.build.dir",
-          "target/test-dir") + "/" + TestHttpCookieFlag.class.getSimpleName();
+  private static final String BASEDIR =
+      GenericTestUtils.getTempPath(TestHttpCookieFlag.class.getSimpleName());
   private static boolean isCookiePersistent;
   private static final long TOKEN_VALIDITY_SEC = 1000;
   private static long expires;
@@ -70,7 +72,7 @@ public class TestAuthenticationSessionCookie {
     @Override
     public void initFilter(FilterContainer container, Configuration conf) {
       container.addFilter("DummyAuth", DummyAuthenticationFilter.class
-              .getName(), null);
+              .getName(), new HashMap<>());
     }
   }
 
@@ -92,7 +94,7 @@ public class TestAuthenticationSessionCookie {
     @Override
     public void initFilter(FilterContainer container, Configuration conf) {
       container.addFilter("Dummy2Auth", Dummy2AuthenticationFilter.class
-              .getName(), null);
+              .getName(), new HashMap<>());
     }
   }
 
@@ -113,10 +115,7 @@ public class TestAuthenticationSessionCookie {
     sslConfDir = KeyStoreTestUtil.getClasspathDir(TestSSLHttpServer.class);
 
     KeyStoreTestUtil.setupSSLConfig(keystoresDir, sslConfDir, conf, false);
-    Configuration sslConf = new Configuration(false);
-    sslConf.addResource("ssl-server.xml");
-    sslConf.addResource("ssl-client.xml");
-
+    Configuration sslConf = KeyStoreTestUtil.getSslConfig();
 
     server = new HttpServer2.Builder()
             .setName("test")
@@ -151,7 +150,7 @@ public class TestAuthenticationSessionCookie {
     String header = conn.getHeaderField("Set-Cookie");
     List<HttpCookie> cookies = HttpCookie.parse(header);
     Assert.assertTrue(!cookies.isEmpty());
-    Log.info(header);
+    Log.getLog().info(header);
     Assert.assertFalse(header.contains("; Expires="));
     Assert.assertTrue("token".equals(cookies.get(0).getValue()));
   }
@@ -173,7 +172,7 @@ public class TestAuthenticationSessionCookie {
     String header = conn.getHeaderField("Set-Cookie");
     List<HttpCookie> cookies = HttpCookie.parse(header);
     Assert.assertTrue(!cookies.isEmpty());
-    Log.info(header);
+    Log.getLog().info(header);
     Assert.assertTrue(header.contains("; Expires="));
     Assert.assertTrue("token".equals(cookies.get(0).getValue()));
   }

@@ -29,6 +29,7 @@ import org.apache.hadoop.ha.ServiceFailedException;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.NameNodeProxies;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.UnregisteredNodeException;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.proto.JournalProtocolProtos.JournalProtocolService;
@@ -141,6 +142,10 @@ public class BackupNode extends NameNode {
 
   @Override // NameNode
   protected void initialize(Configuration conf) throws IOException {
+    // async edit logs are incompatible with backup node due to race
+    // conditions resulting from laxer synchronization
+    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_EDITS_ASYNC_LOGGING, false);
+
     // Trash is disabled in BackupNameNode,
     // but should be turned back on if it ever becomes active.
     conf.setLong(CommonConfigurationKeys.FS_TRASH_INTERVAL_KEY, 
@@ -156,7 +161,7 @@ public class BackupNode extends NameNode {
     // Backup node should never do lease recovery,
     // therefore lease hard limit should never expire.
     namesystem.leaseManager.setLeasePeriod(
-        HdfsServerConstants.LEASE_SOFTLIMIT_PERIOD, Long.MAX_VALUE);
+        HdfsConstants.LEASE_SOFTLIMIT_PERIOD, Long.MAX_VALUE);
 
     // register with the active name-node 
     registerWith(nsInfo);
@@ -216,7 +221,9 @@ public class BackupNode extends NameNode {
 
     // Abort current log segment - otherwise the NN shutdown code
     // will close it gracefully, which is incorrect.
-    getFSImage().getEditLog().abortCurrentLogSegment();
+    if (namesystem != null) {
+      getFSImage().getEditLog().abortCurrentLogSegment();
+    }
 
     // Stop name-node threads
     super.stop();
@@ -462,11 +469,11 @@ public class BackupNode extends NameNode {
      * (not run or not pass any control commands to DataNodes)
      * on BackupNode:
      * {@link LeaseManager.Monitor} protected by SafeMode.
-     * {@link BlockManager.ReplicationMonitor} protected by SafeMode.
+     * {@link BlockManager.RedundancyMonitor} protected by SafeMode.
      * {@link HeartbeatManager.Monitor} protected by SafeMode.
-     * {@link DecommissionManager.Monitor} need to prohibit refreshNodes().
-     * {@link PendingReplicationBlocks.PendingReplicationMonitor} harmless,
-     * because ReplicationMonitor is muted.
+     * {@link DatanodeAdminManager.Monitor} need to prohibit refreshNodes().
+     * {@link PendingReconstructionBlocks.PendingReconstructionMonitor}
+     * harmless, because RedundancyMonitor is muted.
      */
     @Override
     public void startActiveServices() throws IOException {

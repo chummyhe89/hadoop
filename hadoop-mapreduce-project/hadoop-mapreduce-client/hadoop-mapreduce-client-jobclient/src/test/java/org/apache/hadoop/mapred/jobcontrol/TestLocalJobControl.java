@@ -21,20 +21,23 @@ package org.apache.hadoop.mapred.jobcontrol;
 import java.io.IOException;
 import java.util.ArrayList;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.HadoopTestCase;
 import org.apache.hadoop.mapred.JobConf;
+import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import static org.junit.Assert.assertEquals;
 
 /**
  * HadoopTestCase that tests the local job runner.
  */
 public class TestLocalJobControl extends HadoopTestCase {
 
-  public static final Log LOG = LogFactory.getLog(TestLocalJobControl.class
-      .getName());
+  public static final Logger LOG =
+      LoggerFactory.getLogger(TestLocalJobControl.class);
 
   /**
    * Initialises a new instance of this test case to use a Local MR cluster and
@@ -59,6 +62,7 @@ public class TestLocalJobControl extends HadoopTestCase {
    * object. Finally, it creates a thread to run the JobControl object and
    * monitors/reports the job states.
    */
+  @Test
   public void testLocalJobControlDataCopy() throws Exception {
 
     FileSystem fs = FileSystem.get(createJobConf());

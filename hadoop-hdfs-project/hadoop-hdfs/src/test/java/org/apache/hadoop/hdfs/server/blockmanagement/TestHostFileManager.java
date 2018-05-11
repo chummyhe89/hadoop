@@ -22,15 +22,14 @@ import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
+import org.apache.hadoop.test.Whitebox;
 import org.junit.Assert;
 import org.junit.Test;
-import org.mockito.internal.util.reflection.Whitebox;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.Map;
 
-import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 
 public class TestHostFileManager {
@@ -40,7 +39,7 @@ public class TestHostFileManager {
 
   @Test
   public void testDeduplication() {
-    HostFileManager.HostSet s = new HostFileManager.HostSet();
+    HostSet s = new HostSet();
     // These entries will be de-duped, since they refer to the same IP
     // address + port combo.
     s.add(entry("127.0.0.1:12345"));
@@ -60,7 +59,7 @@ public class TestHostFileManager {
 
   @Test
   public void testRelation() {
-    HostFileManager.HostSet s = new HostFileManager.HostSet();
+    HostSet s = new HostSet();
     s.add(entry("127.0.0.1:123"));
     Assert.assertTrue(s.match(entry("127.0.0.1:123")));
     Assert.assertFalse(s.match(entry("127.0.0.1:12")));
@@ -105,8 +104,8 @@ public class TestHostFileManager {
     FSNamesystem fsn = mock(FSNamesystem.class);
     Configuration conf = new Configuration();
     HostFileManager hm = new HostFileManager();
-    HostFileManager.HostSet includedNodes = new HostFileManager.HostSet();
-    HostFileManager.HostSet excludedNodes = new HostFileManager.HostSet();
+    HostSet includedNodes = new HostSet();
+    HostSet excludedNodes = new HostSet();
 
     includedNodes.add(entry("127.0.0.1:12345"));
     includedNodes.add(entry("localhost:12345"));
@@ -122,7 +121,7 @@ public class TestHostFileManager {
     hm.refresh(includedNodes, excludedNodes);
 
     DatanodeManager dm = new DatanodeManager(bm, fsn, conf);
-    Whitebox.setInternalState(dm, "hostFileManager", hm);
+    Whitebox.setInternalState(dm, "hostConfigManager", hm);
     Map<String, DatanodeDescriptor> dnMap = (Map<String,
             DatanodeDescriptor>) Whitebox.getInternalState(dm, "datanodeMap");
 
@@ -151,7 +150,7 @@ public class TestHostFileManager {
     Assert.assertEquals(1, dm.getDatanodeListForReport(HdfsConstants
             .DatanodeReportType.DEAD).size());
     excludedNodes.add(entry("127.0.0.3"));
-    Assert.assertEquals(0, dm.getDatanodeListForReport(HdfsConstants
+    Assert.assertEquals(1, dm.getDatanodeListForReport(HdfsConstants
             .DatanodeReportType.DEAD).size());
   }
 }

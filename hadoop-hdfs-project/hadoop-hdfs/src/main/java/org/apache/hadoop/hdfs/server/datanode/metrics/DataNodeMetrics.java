@@ -22,6 +22,8 @@ import static org.apache.hadoop.metrics2.impl.MsInfo.SessionId;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.server.protocol.DataNodeUsageReport;
+import org.apache.hadoop.hdfs.server.protocol.DataNodeUsageReportUtil;
 import org.apache.hadoop.metrics2.MetricsSystem;
 import org.apache.hadoop.metrics2.annotation.Metric;
 import org.apache.hadoop.metrics2.annotation.Metrics;
@@ -30,6 +32,8 @@ import org.apache.hadoop.metrics2.lib.MetricsRegistry;
 import org.apache.hadoop.metrics2.lib.MutableCounterLong;
 import org.apache.hadoop.metrics2.lib.MutableQuantiles;
 import org.apache.hadoop.metrics2.lib.MutableRate;
+import org.apache.hadoop.metrics2.lib.MutableGaugeInt;
+import org.apache.hadoop.metrics2.lib.MutableGaugeLong;
 import org.apache.hadoop.metrics2.source.JvmMetrics;
 
 import java.util.concurrent.ThreadLocalRandom;
@@ -101,12 +105,17 @@ public class DataNodeMetrics {
   @Metric("Count of network errors on the datanode")
   MutableCounterLong datanodeNetworkErrors;
 
+  @Metric("Count of active dataNode xceivers")
+  private MutableGaugeInt dataNodeActiveXceiversCount;
+
   @Metric MutableRate readBlockOp;
   @Metric MutableRate writeBlockOp;
   @Metric MutableRate blockChecksumOp;
   @Metric MutableRate copyBlockOp;
   @Metric MutableRate replaceBlockOp;
   @Metric MutableRate heartbeats;
+  @Metric MutableRate heartbeatsTotal;
+  @Metric MutableRate lifelines;
   @Metric MutableRate blockReports;
   @Metric MutableRate incrementalBlockReports;
   @Metric MutableRate cacheReports;
@@ -124,10 +133,38 @@ public class DataNodeMetrics {
   @Metric MutableRate sendDataPacketTransferNanos;
   final MutableQuantiles[] sendDataPacketTransferNanosQuantiles;
 
+  @Metric("Count of blocks in pending IBR")
+  private MutableGaugeLong blocksInPendingIBR;
+  @Metric("Count of blocks at receiving status in pending IBR")
+  private MutableGaugeLong blocksReceivingInPendingIBR;
+  @Metric("Count of blocks at received status in pending IBR")
+  private MutableGaugeLong blocksReceivedInPendingIBR;
+  @Metric("Count of blocks at deleted status in pending IBR")
+  private MutableGaugeLong blocksDeletedInPendingIBR;
+  @Metric("Count of erasure coding reconstruction tasks")
+  MutableCounterLong ecReconstructionTasks;
+  @Metric("Count of erasure coding failed reconstruction tasks")
+  MutableCounterLong ecFailedReconstructionTasks;
+  @Metric("Nanoseconds spent by decoding tasks")
+  MutableCounterLong ecDecodingTimeNanos;
+  @Metric("Bytes read by erasure coding worker")
+  MutableCounterLong ecReconstructionBytesRead;
+  @Metric("Bytes written by erasure coding worker")
+  MutableCounterLong ecReconstructionBytesWritten;
+  @Metric("Bytes remote read by erasure coding worker")
+  MutableCounterLong ecReconstructionRemoteBytesRead;
+  @Metric("Milliseconds spent on read by erasure coding worker")
+  private MutableCounterLong ecReconstructionReadTimeMillis;
+  @Metric("Milliseconds spent on decoding by erasure coding worker")
+  private MutableCounterLong ecReconstructionDecodingTimeMillis;
+  @Metric("Milliseconds spent on write by erasure coding worker")
+  private MutableCounterLong ecReconstructionWriteTimeMillis;
+
   final MetricsRegistry registry = new MetricsRegistry("datanode");
   final String name;
   JvmMetrics jvmMetrics = null;
-  
+  private DataNodeUsageReportUtil dnUsageReportUtil;
+
   public DataNodeMetrics(String name, String sessionId, int[] intervals,
       final JvmMetrics jvmMetrics) {
     this.name = name;
@@ -135,6 +172,7 @@ public class DataNodeMetrics {
     registry.tag(SessionId, sessionId);
     
     final int len = intervals.length;
+    dnUsageReportUtil = new DataNodeUsageReportUtil();
     packetAckRoundTripTimeNanosQuantiles = new MutableQuantiles[len];
     flushNanosQuantiles = new MutableQuantiles[len];
     fsyncNanosQuantiles = new MutableQuantiles[len];
@@ -142,7 +180,7 @@ public class DataNodeMetrics {
     sendDataPacketTransferNanosQuantiles = new MutableQuantiles[len];
     ramDiskBlocksEvictionWindowMsQuantiles = new MutableQuantiles[len];
     ramDiskBlocksLazyPersistWindowMsQuantiles = new MutableQuantiles[len];
-    
+
     for (int i = 0; i < len; i++) {
       int interval = intervals[i];
       packetAckRoundTripTimeNanosQuantiles[i] = registry.newQuantiles(
@@ -197,6 +235,14 @@ public class DataNodeMetrics {
   
   public void addHeartbeat(long latency) {
     heartbeats.add(latency);
+  }
+
+  public void addHeartbeatTotal(long latency) {
+    heartbeatsTotal.add(latency);
+  }
+
+  public void addLifeline(long latency) {
+    lifelines.add(latency);
   }
 
   public void addBlockReport(long latency) {
@@ -404,5 +450,85 @@ public class DataNodeMetrics {
     for (MutableQuantiles q : ramDiskBlocksLazyPersistWindowMsQuantiles) {
       q.add(latencyMs);
     }
+  }
+
+  /**
+   * Resets blocks in pending IBR to zero.
+   */
+  public void resetBlocksInPendingIBR() {
+    blocksInPendingIBR.set(0);
+    blocksReceivingInPendingIBR.set(0);
+    blocksReceivedInPendingIBR.set(0);
+    blocksDeletedInPendingIBR.set(0);
+  }
+
+  public void incrBlocksInPendingIBR() {
+    blocksInPendingIBR.incr();
+  }
+
+  public void incrBlocksReceivingInPendingIBR() {
+    blocksReceivingInPendingIBR.incr();
+  }
+
+  public void incrBlocksReceivedInPendingIBR() {
+    blocksReceivedInPendingIBR.incr();
+  }
+
+  public void incrBlocksDeletedInPendingIBR() {
+    blocksDeletedInPendingIBR.incr();
+  }
+
+  public void incrECReconstructionTasks() {
+    ecReconstructionTasks.incr();
+  }
+
+  public void incrECFailedReconstructionTasks() {
+    ecFailedReconstructionTasks.incr();
+  }
+
+  public void incrDataNodeActiveXceiversCount() {
+    dataNodeActiveXceiversCount.incr();
+  }
+
+  public void decrDataNodeActiveXceiversCount() {
+    dataNodeActiveXceiversCount.decr();
+  }
+
+  public void setDataNodeActiveXceiversCount(int value) {
+    dataNodeActiveXceiversCount.set(value);
+  }
+
+  public void incrECDecodingTime(long decodingTimeNanos) {
+    ecDecodingTimeNanos.incr(decodingTimeNanos);
+  }
+
+  public void incrECReconstructionBytesRead(long bytes) {
+    ecReconstructionBytesRead.incr(bytes);
+  }
+
+  public void incrECReconstructionRemoteBytesRead(long bytes) {
+    ecReconstructionRemoteBytesRead.incr(bytes);
+  }
+
+  public void incrECReconstructionBytesWritten(long bytes) {
+    ecReconstructionBytesWritten.incr(bytes);
+  }
+
+  public void incrECReconstructionReadTime(long millis) {
+    ecReconstructionReadTimeMillis.incr(millis);
+  }
+
+  public void incrECReconstructionWriteTime(long millis) {
+    ecReconstructionWriteTimeMillis.incr(millis);
+  }
+
+  public void incrECReconstructionDecodingTime(long millis) {
+    ecReconstructionDecodingTimeMillis.incr(millis);
+  }
+
+  public DataNodeUsageReport getDNUsageReport(long timeSinceLastReport) {
+    return dnUsageReportUtil.getUsageReport(bytesWritten.value(), bytesRead
+            .value(), totalWriteTime.value(), totalReadTime.value(),
+        blocksWritten.value(), blocksRead.value(), timeSinceLastReport);
   }
 }

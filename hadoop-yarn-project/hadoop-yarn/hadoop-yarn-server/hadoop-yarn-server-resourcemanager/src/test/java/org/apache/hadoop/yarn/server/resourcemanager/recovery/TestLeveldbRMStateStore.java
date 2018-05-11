@@ -18,6 +18,11 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.recovery;
 
+import static org.mockito.Mockito.isNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
+
 import java.io.File;
 import java.io.IOException;
 
@@ -25,6 +30,9 @@ import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.server.records.Version;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
+import org.fusesource.leveldbjni.JniDBFactory;
+import org.iq80.leveldb.DB;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -74,6 +82,8 @@ public class TestLeveldbRMStateStore extends RMStateStoreTestBase {
 
   @Test(timeout = 60000)
   public void testEpoch() throws Exception {
+    conf.setLong(YarnConfiguration.RM_EPOCH, epoch);
+    conf.setLong(YarnConfiguration.RM_EPOCH_RANGE, getEpochRange());
     LeveldbStateStoreTester tester = new LeveldbStateStoreTester();
     testEpoch(tester);
   }
@@ -97,6 +107,12 @@ public class TestLeveldbRMStateStore extends RMStateStoreTestBase {
   }
 
   @Test(timeout = 60000)
+  public void testRemoveAttempt() throws Exception {
+    LeveldbStateStoreTester tester = new LeveldbStateStoreTester();
+    testRemoveAttempt(tester);
+  }
+
+  @Test(timeout = 60000)
   public void testAMTokens() throws Exception {
     LeveldbStateStoreTester tester = new LeveldbStateStoreTester();
     testAMRMTokenSecretManagerStateStore(tester);
@@ -106,6 +122,33 @@ public class TestLeveldbRMStateStore extends RMStateStoreTestBase {
   public void testReservation() throws Exception {
     LeveldbStateStoreTester tester = new LeveldbStateStoreTester();
     testReservationStateStore(tester);
+  }
+
+  @Test(timeout = 60000)
+  public void testCompactionCycle() throws Exception {
+    final DB mockdb = mock(DB.class);
+    conf.setLong(YarnConfiguration.RM_LEVELDB_COMPACTION_INTERVAL_SECS, 1);
+    stateStore = new LeveldbRMStateStore() {
+      @Override
+      protected DB openDatabase() throws Exception {
+        return mockdb;
+      }
+    };
+    stateStore.init(conf);
+    stateStore.start();
+    verify(mockdb, timeout(10000)).compactRange(
+        (byte[]) isNull(), (byte[]) isNull());
+  }
+
+  @Test
+  public void testBadKeyIteration() throws Exception {
+    stateStore = new LeveldbRMStateStore();
+    stateStore.init(conf);
+    stateStore.start();
+    DB db = stateStore.getDatabase();
+    // add an entry that appears at the end of the database when iterating
+    db.put(JniDBFactory.bytes("zzz"), JniDBFactory.bytes("z"));
+    stateStore.loadState();
   }
 
   class LeveldbStateStoreTester implements RMStateStoreHelper {
@@ -118,6 +161,7 @@ public class TestLeveldbRMStateStore extends RMStateStoreTestBase {
       stateStore = new LeveldbRMStateStore();
       stateStore.init(conf);
       stateStore.start();
+      stateStore.dispatcher.disableExitOnDispatchException();
       return stateStore;
     }
 
@@ -146,6 +190,15 @@ public class TestLeveldbRMStateStore extends RMStateStoreTestBase {
         getRMStateStore();
       }
       return stateStore.loadRMAppState(app.getApplicationId()) != null;
+    }
+
+    @Override
+    public boolean attemptExists(RMAppAttempt attempt) throws Exception {
+      if (stateStore.isClosed()) {
+        getRMStateStore();
+      }
+      return stateStore.loadRMAppAttemptState(attempt.getAppAttemptId())
+          != null;
     }
   }
 }

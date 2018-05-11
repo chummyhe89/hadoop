@@ -64,6 +64,7 @@ abstract public class FsCommand extends Command {
     factory.registerCommands(SetReplication.class);
     factory.registerCommands(Stat.class);
     factory.registerCommands(Tail.class);
+    factory.registerCommands(Head.class);
     factory.registerCommands(Test.class);
     factory.registerCommands(Touch.class);
     factory.registerCommands(Truncate.class);
@@ -112,7 +113,7 @@ abstract public class FsCommand extends Command {
           defaultFs == null || defaultFs.equals(FS_DEFAULT_NAME_DEFAULT);
       if (missingDefaultFs) {
         err.printf(
-            "Warning: fs.defaultFs is not set when running \"%s\" command.%n",
+            "Warning: fs.defaultFS is not set when running \"%s\" command.%n",
             getCommandName());
       }
     }

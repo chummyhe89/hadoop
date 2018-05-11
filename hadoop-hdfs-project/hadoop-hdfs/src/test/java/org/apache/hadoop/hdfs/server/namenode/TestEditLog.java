@@ -56,7 +56,6 @@ import java.util.regex.Pattern;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.ChecksumException;
 import org.apache.hadoop.fs.FileSystem;
@@ -89,6 +88,9 @@ import org.apache.log4j.AppenderSkeleton;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.spi.LoggingEvent;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
 import org.mockito.Mockito;
 import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
@@ -99,15 +101,36 @@ import com.google.common.collect.Lists;
 /**
  * This class tests the creation and validation of a checkpoint.
  */
+@RunWith(Parameterized.class)
 public class TestEditLog {
-  
+
   static {
-    ((Log4JLogger)FSEditLog.LOG).getLogger().setLevel(Level.ALL);
+    GenericTestUtils.setLogLevel(FSEditLog.LOG, Level.ALL);
+  }
+
+  @Parameters
+  public static Collection<Object[]> data() {
+    Collection<Object[]> params = new ArrayList<Object[]>();
+    params.add(new Object[]{ Boolean.FALSE });
+    params.add(new Object[]{ Boolean.TRUE });
+    return params;
+  }
+
+  private static boolean useAsyncEditLog;
+  public TestEditLog(Boolean async) {
+    useAsyncEditLog = async;
+  }
+
+  public static Configuration getConf() {
+    Configuration conf = new HdfsConfiguration();
+    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_EDITS_ASYNC_LOGGING,
+        useAsyncEditLog);
+    return conf;
   }
 
   /**
    * A garbage mkdir op which is used for testing
-   * {@link EditLogFileInputStream#scanEditLog(File)}
+   * {@link EditLogFileInputStream#scanEditLog(File, long, boolean)}
    */
   public static class GarbageMkdirOp extends FSEditLogOp {
     public GarbageMkdirOp() {
@@ -226,11 +249,12 @@ public class TestEditLog {
    * @param storage Storage object used by namenode
    */
   private static FSEditLog getFSEditLog(NNStorage storage) throws IOException {
-    Configuration conf = new Configuration();
+    Configuration conf = getConf();
     // Make sure the edits dirs are set in the provided configuration object.
     conf.set(DFSConfigKeys.DFS_NAMENODE_EDITS_DIR_KEY,
         StringUtils.join(",", storage.getEditsDirectories()));
-    FSEditLog log = new FSEditLog(conf, storage, FSNamesystem.getNamespaceEditsDirs(conf));
+    FSEditLog log = FSEditLog.newInstance(
+        conf, storage, FSNamesystem.getNamespaceEditsDirs(conf));
     return log;
   }
 
@@ -253,7 +277,7 @@ public class TestEditLog {
    */
   @Test
   public void testPreTxidEditLogWithEdits() throws Exception {
-    Configuration conf = new HdfsConfiguration();
+    Configuration conf = getConf();
     MiniDFSCluster cluster = null;
 
     try {
@@ -264,7 +288,8 @@ public class TestEditLog {
       long numEdits = testLoad(HADOOP20_SOME_EDITS, namesystem);
       assertEquals(3, numEdits);
       // Sanity check the edit
-      HdfsFileStatus fileInfo = namesystem.getFileInfo("/myfile", false);
+      HdfsFileStatus fileInfo =
+          namesystem.getFileInfo("/myfile", false, false, false);
       assertEquals("supergroup", fileInfo.getGroup());
       assertEquals(3, fileInfo.getReplication());
     } finally {
@@ -283,7 +308,7 @@ public class TestEditLog {
   @Test
   public void testSimpleEditLog() throws IOException {
     // start a cluster 
-    Configuration conf = new HdfsConfiguration();
+    Configuration conf = getConf();
     MiniDFSCluster cluster = null;
     FileSystem fileSys = null;
     try {
@@ -352,7 +377,7 @@ public class TestEditLog {
   private void testEditLog(int initialSize) throws IOException {
 
     // start a cluster 
-    Configuration conf = new HdfsConfiguration();
+    Configuration conf = getConf();
     MiniDFSCluster cluster = null;
     FileSystem fileSys = null;
 
@@ -483,8 +508,12 @@ public class TestEditLog {
 
   @Test
   public void testSyncBatching() throws Exception {
-    // start a cluster 
-    Configuration conf = new HdfsConfiguration();
+    if (useAsyncEditLog) {
+      // semantics are completely differently since edits will be auto-synced
+      return;
+    }
+    // start a cluster
+    Configuration conf = getConf();
     MiniDFSCluster cluster = null;
     FileSystem fileSys = null;
     ExecutorService threadA = Executors.newSingleThreadExecutor();
@@ -547,7 +576,7 @@ public class TestEditLog {
   @Test
   public void testBatchedSyncWithClosedLogs() throws Exception {
     // start a cluster 
-    Configuration conf = new HdfsConfiguration();
+    Configuration conf = getConf();
     MiniDFSCluster cluster = null;
     FileSystem fileSys = null;
     ExecutorService threadA = Executors.newSingleThreadExecutor();
@@ -563,9 +592,12 @@ public class TestEditLog {
 
       // Log an edit from thread A
       doLogEdit(threadA, editLog, "thread-a 1");
-      assertEquals("logging edit without syncing should do not affect txid",
-        1, editLog.getSyncTxId());
-
+      // async log is doing batched syncs in background.  logSync just ensures
+      // the edit is durable, so the txid may increase prior to sync
+      if (!useAsyncEditLog) {
+        assertEquals("logging edit without syncing should do not affect txid",
+            1, editLog.getSyncTxId());
+      }
       // logSyncAll in Thread B
       doCallLogSyncAll(threadB, editLog);
       assertEquals("logSyncAll should sync thread A's transaction",
@@ -587,7 +619,7 @@ public class TestEditLog {
   @Test
   public void testEditChecksum() throws Exception {
     // start a cluster 
-    Configuration conf = new HdfsConfiguration();
+    Configuration conf = getConf();
     MiniDFSCluster cluster = null;
     FileSystem fileSys = null;
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(NUM_DATA_NODES).build();
@@ -659,7 +691,7 @@ public class TestEditLog {
    */
   private void testCrashRecovery(int numTransactions) throws Exception {
     MiniDFSCluster cluster = null;
-    Configuration conf = new HdfsConfiguration();
+    Configuration conf = getConf();
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_TXNS_KEY,
         CHECKPOINT_ON_STARTUP_MIN_TXNS);
     
@@ -804,7 +836,7 @@ public class TestEditLog {
       boolean updateTransactionIdFile, boolean shouldSucceed)
       throws Exception {
     // start a cluster 
-    Configuration conf = new HdfsConfiguration();
+    Configuration conf = getConf();
     MiniDFSCluster cluster = null;
     cluster = new MiniDFSCluster.Builder(conf)
       .numDataNodes(NUM_DATA_NODES).build();
@@ -1006,9 +1038,9 @@ public class TestEditLog {
         "[1,100]|[101,200]|[201,]");
     log = getFSEditLog(storage);
     log.initJournalsForWrite();
-    assertEquals("[[1,100], [101,200]]",
+    assertEquals("[[1,100], [101,200]] CommittedTxId: 200",
         log.getEditLogManifest(1).toString());
-    assertEquals("[[101,200]]",
+    assertEquals("[[101,200]] CommittedTxId: 200",
         log.getEditLogManifest(101).toString());
 
     // Another simple case, different directories have different
@@ -1018,8 +1050,8 @@ public class TestEditLog {
         "[1,100]|[201,300]|[301,400]"); // nothing starting at 101
     log = getFSEditLog(storage);
     log.initJournalsForWrite();
-    assertEquals("[[1,100], [101,200], [201,300], [301,400]]",
-        log.getEditLogManifest(1).toString());
+    assertEquals("[[1,100], [101,200], [201,300], [301,400]]" +
+            " CommittedTxId: 400", log.getEditLogManifest(1).toString());
     
     // Case where one directory has an earlier finalized log, followed
     // by a gap. The returned manifest should start after the gap.
@@ -1028,7 +1060,7 @@ public class TestEditLog {
         "[301,400]|[401,500]");
     log = getFSEditLog(storage);
     log.initJournalsForWrite();
-    assertEquals("[[301,400], [401,500]]",
+    assertEquals("[[301,400], [401,500]] CommittedTxId: 500",
         log.getEditLogManifest(1).toString());
     
     // Case where different directories have different length logs
@@ -1038,9 +1070,9 @@ public class TestEditLog {
         "[1,50]|[101,200]"); // short log at 1
     log = getFSEditLog(storage);
     log.initJournalsForWrite();
-    assertEquals("[[1,100], [101,200]]",
+    assertEquals("[[1,100], [101,200]] CommittedTxId: 200",
         log.getEditLogManifest(1).toString());
-    assertEquals("[[101,200]]",
+    assertEquals("[[101,200]] CommittedTxId: 200",
         log.getEditLogManifest(101).toString());
 
     // Case where the first storage has an inprogress while
@@ -1051,9 +1083,9 @@ public class TestEditLog {
         "[1,100]|[101,200]"); 
     log = getFSEditLog(storage);
     log.initJournalsForWrite();
-    assertEquals("[[1,100], [101,200]]",
+    assertEquals("[[1,100], [101,200]] CommittedTxId: 200",
         log.getEditLogManifest(1).toString());
-    assertEquals("[[101,200]]",
+    assertEquals("[[101,200]] CommittedTxId: 200",
         log.getEditLogManifest(101).toString());
   }
   
@@ -1110,7 +1142,7 @@ public class TestEditLog {
     /**
      * Construct the failure specification. 
      * @param roll number to fail after. e.g. 1 to fail after the first roll
-     * @param loginfo index of journal to fail. 
+     * @param logindex index of journal to fail.
      */
     AbortSpec(int roll, int logindex) {
       this.roll = roll;
@@ -1135,7 +1167,7 @@ public class TestEditLog {
   public static NNStorage setupEdits(List<URI> editUris, int numrolls,
       boolean closeOnFinish, AbortSpec... abortAtRolls) throws IOException {
     List<AbortSpec> aborts = new ArrayList<AbortSpec>(Arrays.asList(abortAtRolls));
-    NNStorage storage = new NNStorage(new Configuration(),
+    NNStorage storage = new NNStorage(getConf(),
                                       Collections.<URI>emptyList(),
                                       editUris);
     storage.format(new NamespaceInfo());
@@ -1146,7 +1178,7 @@ public class TestEditLog {
     editlog.initJournalsForWrite();
     editlog.openForWrite(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
     for (int i = 2; i < TXNS_PER_ROLL; i++) {
-      editlog.logGenerationStampV2((long) 0);
+      editlog.logGenerationStamp((long) 0);
     }
     editlog.logSync();
     
@@ -1158,7 +1190,7 @@ public class TestEditLog {
     for (int i = 0; i < numrolls; i++) {
       editlog.rollEditLog(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
       
-      editlog.logGenerationStampV2((long) i);
+      editlog.logGenerationStamp((long) i);
       editlog.logSync();
 
       while (aborts.size() > 0 
@@ -1168,7 +1200,7 @@ public class TestEditLog {
       } 
       
       for (int j = 3; j < TXNS_PER_ROLL; j++) {
-        editlog.logGenerationStampV2((long) i);
+        editlog.logGenerationStamp((long) i);
       }
       editlog.logSync();
     }
@@ -1229,7 +1261,7 @@ public class TestEditLog {
 
     for (EditLogInputStream edits : editStreams) {
       FSEditLogLoader.EditLogValidation val =
-          FSEditLogLoader.validateEditLog(edits, Long.MAX_VALUE);
+          FSEditLogLoader.scanEditLog(edits, Long.MAX_VALUE);
       long read = (val.getEndTxId() - edits.getFirstTxId()) + 1;
       LOG.info("Loading edits " + edits + " read " + read);
       assertEquals(startTxId, edits.getFirstTxId());
@@ -1297,7 +1329,7 @@ public class TestEditLog {
     EditLogFileOutputStream elfos = null;
     EditLogFileInputStream elfis = null;
     try {
-      elfos = new EditLogFileOutputStream(new Configuration(), TEST_LOG_NAME, 0);
+      elfos = new EditLogFileOutputStream(getConf(), TEST_LOG_NAME, 0);
       elfos.create(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
       elfos.writeRaw(garbage, 0, garbage.length);
       elfos.setReadyToFlush();
@@ -1475,7 +1507,7 @@ public class TestEditLog {
   public void testManyEditLogSegments() throws IOException {
     final int NUM_EDIT_LOG_ROLLS = 1000;
     // start a cluster
-    Configuration conf = new HdfsConfiguration();
+    Configuration conf = getConf();
     MiniDFSCluster cluster = null;
     FileSystem fileSys = null;
     try {

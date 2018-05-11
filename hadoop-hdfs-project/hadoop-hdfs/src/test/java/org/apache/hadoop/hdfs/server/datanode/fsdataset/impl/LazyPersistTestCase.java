@@ -18,7 +18,6 @@
 package org.apache.hadoop.hdfs.server.datanode.fsdataset.impl;
 
 import com.google.common.base.Supplier;
-import org.apache.commons.lang.UnhandledException;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 
 import static org.apache.hadoop.fs.CreateFlag.CREATE;
@@ -130,17 +129,33 @@ public abstract class LazyPersistTestCase {
   public Timeout timeout = new Timeout(300000);
 
   protected final LocatedBlocks ensureFileReplicasOnStorageType(
-      Path path, StorageType storageType) throws IOException {
+      Path path, StorageType storageType)
+      throws IOException, TimeoutException, InterruptedException {
     // Ensure that returned block locations returned are correct!
     LOG.info("Ensure path: " + path + " is on StorageType: " + storageType);
     assertThat(fs.exists(path), is(true));
     long fileLength = client.getFileInfo(path.toString()).getLen();
-    LocatedBlocks locatedBlocks =
-        client.getLocatedBlocks(path.toString(), 0, fileLength);
-    for (LocatedBlock locatedBlock : locatedBlocks.getLocatedBlocks()) {
-      assertThat(locatedBlock.getStorageTypes()[0], is(storageType));
-    }
-    return locatedBlocks;
+
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        try {
+          LocatedBlocks locatedBlocks =
+              client.getLocatedBlocks(path.toString(), 0, fileLength);
+          for (LocatedBlock locatedBlock : locatedBlocks.getLocatedBlocks()) {
+            if (locatedBlock.getStorageTypes()[0] != storageType) {
+              return false;
+            }
+          }
+          return true;
+        } catch (IOException ioe) {
+          LOG.warn("Exception got in ensureFileReplicasOnStorageType()", ioe);
+          return false;
+        }
+      }
+    }, 100, 30 * 1000);
+
+    return client.getLocatedBlocks(path.toString(), 0, fileLength);
   }
 
   /**
@@ -452,7 +467,7 @@ public abstract class LazyPersistTestCase {
     triggerBlockReport();
 
     while(
-      DataNodeTestUtils.getPendingAsyncDeletions(cluster.getDataNodes().get(0))
+        cluster.getFsDatasetTestUtils(0).getPendingAsyncDeletions()
         > 0L){
       Thread.sleep(1000);
     }
@@ -480,6 +495,7 @@ public abstract class LazyPersistTestCase {
 
   protected final void verifyRamDiskJMXMetric(String metricName,
       long expectedValue) throws Exception {
+    waitForMetric(metricName, (int)expectedValue);
     assertEquals(expectedValue, Integer.parseInt(jmx.getValue(metricName)));
   }
 
@@ -510,20 +526,7 @@ public abstract class LazyPersistTestCase {
 
   protected void waitForMetric(final String metricName, final int expectedValue)
       throws TimeoutException, InterruptedException {
-    GenericTestUtils.waitFor(new Supplier<Boolean>() {
-      @Override
-      public Boolean get() {
-        try {
-          final int currentValue = Integer.parseInt(jmx.getValue(metricName));
-          LOG.info("Waiting for " + metricName +
-                       " to reach value " + expectedValue +
-                       ", current value = " + currentValue);
-          return currentValue == expectedValue;
-        } catch (Exception e) {
-          throw new UnhandledException("Test failed due to unexpected exception", e);
-        }
-      }
-    }, 1000, Integer.MAX_VALUE);
+    DFSTestUtil.waitForMetric(jmx, metricName, expectedValue);
   }
 
   protected void triggerEviction(DataNode dn) {

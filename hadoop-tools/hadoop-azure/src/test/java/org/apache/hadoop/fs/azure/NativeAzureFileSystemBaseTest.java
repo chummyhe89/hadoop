@@ -18,13 +18,6 @@
 
 package org.apache.hadoop.fs.azure;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-import static org.junit.Assume.assumeNotNull;
-
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.FileNotFoundException;
@@ -48,17 +41,17 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.contract.ContractTestUtils;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Test;
-import org.apache.hadoop.fs.azure.AzureException;
 import org.apache.hadoop.fs.azure.NativeAzureFileSystem.FolderRenamePending;
 
 import com.microsoft.azure.storage.AccessCondition;
 import com.microsoft.azure.storage.StorageException;
 import com.microsoft.azure.storage.blob.CloudBlob;
+
+import static org.apache.hadoop.test.GenericTestUtils.*;
 
 /*
  * Tests the Native Azure file system (WASB) against an actual blob store if
@@ -68,42 +61,52 @@ import com.microsoft.azure.storage.blob.CloudBlob;
  * For hand-testing: remove "abstract" keyword and copy in an implementation of createTestAccount
  * from one of the subclasses
  */
-public abstract class NativeAzureFileSystemBaseTest {
+public abstract class NativeAzureFileSystemBaseTest
+    extends AbstractWasbTestBase {
 
-  protected FileSystem fs;
-  private AzureBlobStorageTestAccount testAccount;
   private final long modifiedTimeErrorMargin = 5 * 1000; // Give it +/-5 seconds
 
-  protected abstract AzureBlobStorageTestAccount createTestAccount() throws Exception;
-
   public static final Log LOG = LogFactory.getLog(NativeAzureFileSystemBaseTest.class);
+  protected NativeAzureFileSystem fs;
 
-  @Before
+  @Override
   public void setUp() throws Exception {
-    testAccount = createTestAccount();
-    if (testAccount != null) {
-      fs = testAccount.getFileSystem();
-    }
-    assumeNotNull(testAccount);
+    super.setUp();
+    fs = getFileSystem();
   }
 
-  @After
-  public void tearDown() throws Exception {
-    if (testAccount != null) {
-      testAccount.cleanup();
-      testAccount = null;
-      fs = null;
-    }
+  /**
+   * Assert that a path does not exist.
+   *
+   * @param message message to include in the assertion failure message
+   * @param path path in the filesystem
+   * @throws IOException IO problems
+   */
+  public void assertPathDoesNotExist(String message,
+      Path path) throws IOException {
+    ContractTestUtils.assertPathDoesNotExist(fs, message, path);
+  }
+
+  /**
+   * Assert that a path exists.
+   *
+   * @param message message to include in the assertion failure message
+   * @param path path in the filesystem
+   * @throws IOException IO problems
+   */
+  public void assertPathExists(String message,
+      Path path) throws IOException {
+    ContractTestUtils.assertPathExists(fs, message, path);
   }
 
   @Test
   public void testCheckingNonExistentOneLetterFile() throws Exception {
-    assertFalse(fs.exists(new Path("/a")));
+    assertPathDoesNotExist("one letter file", new Path("/a"));
   }
 
   @Test
   public void testStoreRetrieveFile() throws Exception {
-    Path testFile = new Path("unit-test-file");
+    Path testFile = methodPath();
     writeString(testFile, "Testing");
     assertTrue(fs.exists(testFile));
     FileStatus status = fs.getFileStatus(testFile);
@@ -117,7 +120,7 @@ public abstract class NativeAzureFileSystemBaseTest {
 
   @Test
   public void testStoreDeleteFolder() throws Exception {
-    Path testFolder = new Path("storeDeleteFolder");
+    Path testFolder = methodPath();
     assertFalse(fs.exists(testFolder));
     assertTrue(fs.mkdirs(testFolder));
     assertTrue(fs.exists(testFolder));
@@ -129,22 +132,22 @@ public abstract class NativeAzureFileSystemBaseTest {
     assertEquals(new FsPermission((short) 0755), status.getPermission());
     Path innerFile = new Path(testFolder, "innerFile");
     assertTrue(fs.createNewFile(innerFile));
-    assertTrue(fs.exists(innerFile));
+    assertPathExists("inner file", innerFile);
     assertTrue(fs.delete(testFolder, true));
-    assertFalse(fs.exists(innerFile));
-    assertFalse(fs.exists(testFolder));
+    assertPathDoesNotExist("inner file", innerFile);
+    assertPathDoesNotExist("testFolder", testFolder);
   }
 
   @Test
   public void testFileOwnership() throws Exception {
-    Path testFile = new Path("ownershipTestFile");
+    Path testFile = methodPath();
     writeString(testFile, "Testing");
     testOwnership(testFile);
   }
 
   @Test
   public void testFolderOwnership() throws Exception {
-    Path testFolder = new Path("ownershipTestFolder");
+    Path testFolder = methodPath();
     fs.mkdirs(testFolder);
     testOwnership(testFolder);
   }
@@ -171,7 +174,7 @@ public abstract class NativeAzureFileSystemBaseTest {
 
   @Test
   public void testFilePermissions() throws Exception {
-    Path testFile = new Path("permissionTestFile");
+    Path testFile = methodPath();
     FsPermission permission = FsPermission.createImmutable((short) 644);
     createEmptyFile(testFile, permission);
     FileStatus ret = fs.getFileStatus(testFile);
@@ -181,7 +184,7 @@ public abstract class NativeAzureFileSystemBaseTest {
 
   @Test
   public void testFolderPermissions() throws Exception {
-    Path testFolder = new Path("permissionTestFolder");
+    Path testFolder = methodPath();
     FsPermission permission = FsPermission.createImmutable((short) 644);
     fs.mkdirs(testFolder, permission);
     FileStatus ret = fs.getFileStatus(testFolder);
@@ -200,9 +203,9 @@ public abstract class NativeAzureFileSystemBaseTest {
     createEmptyFile(testFile, permission);
     FsPermission rootPerm = fs.getFileStatus(firstDir.getParent()).getPermission();
     FsPermission inheritPerm = FsPermission.createImmutable((short)(rootPerm.toShort() | 0300));
-    assertTrue(fs.exists(testFile));
-    assertTrue(fs.exists(firstDir));
-    assertTrue(fs.exists(middleDir));
+    assertPathExists("test file", testFile);
+    assertPathExists("firstDir", firstDir);
+    assertPathExists("middleDir", middleDir);
     // verify that the indirectly created directory inherited its permissions from the root directory
     FileStatus directoryStatus = fs.getFileStatus(middleDir);
     assertTrue(directoryStatus.isDirectory());
@@ -212,7 +215,7 @@ public abstract class NativeAzureFileSystemBaseTest {
     assertFalse(fileStatus.isDirectory());
     assertEqualsIgnoreStickyBit(umaskedPermission, fileStatus.getPermission());
     assertTrue(fs.delete(firstDir, true));
-    assertFalse(fs.exists(testFile));
+    assertPathDoesNotExist("deleted file", testFile);
 
     // An alternative test scenario would've been to delete the file first,
     // and then check for the existence of the upper folders still. But that
@@ -288,7 +291,7 @@ public abstract class NativeAzureFileSystemBaseTest {
     assertTrue(fs.delete(new Path("deep"), true));
   }
 
-  private static enum RenameFolderVariation {
+  private enum RenameFolderVariation {
     CreateFolderAndInnerFile, CreateJustInnerFile, CreateJustFolder
   }
 
@@ -327,10 +330,10 @@ public abstract class NativeAzureFileSystemBaseTest {
     localFs.delete(localFilePath, true);
     try {
       writeString(localFs, localFilePath, "Testing");
-      Path dstPath = new Path("copiedFromLocal");
+      Path dstPath = methodPath();
       assertTrue(FileUtil.copy(localFs, localFilePath, fs, dstPath, false,
           fs.getConf()));
-      assertTrue(fs.exists(dstPath));
+      assertPathExists("coied from local", dstPath);
       assertEquals("Testing", readString(fs, dstPath));
       fs.delete(dstPath, true);
     } finally {
@@ -447,32 +450,32 @@ public abstract class NativeAzureFileSystemBaseTest {
 
   @Test
   public void testReadingDirectoryAsFile() throws Exception {
-    Path dir = new Path("/x");
+    Path dir = methodPath();
     assertTrue(fs.mkdirs(dir));
     try {
       fs.open(dir).close();
       assertTrue("Should've thrown", false);
     } catch (FileNotFoundException ex) {
-      assertEquals("/x is a directory not a file.", ex.getMessage());
+      assertExceptionContains("a directory not a file.", ex);
     }
   }
 
   @Test
   public void testCreatingFileOverDirectory() throws Exception {
-    Path dir = new Path("/x");
+    Path dir = methodPath();
     assertTrue(fs.mkdirs(dir));
     try {
       fs.create(dir).close();
       assertTrue("Should've thrown", false);
     } catch (IOException ex) {
-      assertEquals("Cannot create file /x; already exists as a directory.",
-          ex.getMessage());
+      assertExceptionContains("Cannot create file", ex);
+      assertExceptionContains("already exists as a directory", ex);
     }
   }
 
   @Test
   public void testInputStreamReadWithZeroSizeBuffer() throws Exception {
-    Path newFile = new Path("zeroSizeRead");
+    Path newFile = methodPath();
     OutputStream output = fs.create(newFile);
     output.write(10);
     output.close();
@@ -484,7 +487,7 @@ public abstract class NativeAzureFileSystemBaseTest {
 
   @Test
   public void testInputStreamReadWithBufferReturnsMinusOneOnEof() throws Exception {
-    Path newFile = new Path("eofRead");
+    Path newFile = methodPath();
     OutputStream output = fs.create(newFile);
     output.write(10);
     output.close();
@@ -506,7 +509,7 @@ public abstract class NativeAzureFileSystemBaseTest {
 
   @Test
   public void testInputStreamReadWithBufferReturnsMinusOneOnEofForLargeBuffer() throws Exception {
-    Path newFile = new Path("eofRead2");
+    Path newFile = methodPath();
     OutputStream output = fs.create(newFile);
     byte[] outputBuff = new byte[97331];
     for(int i = 0; i < outputBuff.length; ++i) {
@@ -532,7 +535,7 @@ public abstract class NativeAzureFileSystemBaseTest {
 
   @Test
   public void testInputStreamReadIntReturnsMinusOneOnEof() throws Exception {
-    Path newFile = new Path("eofRead3");
+    Path newFile = methodPath();
     OutputStream output = fs.create(newFile);
     output.write(10);
     output.close();
@@ -549,7 +552,7 @@ public abstract class NativeAzureFileSystemBaseTest {
 
   @Test
   public void testSetPermissionOnFile() throws Exception {
-    Path newFile = new Path("testPermission");
+    Path newFile = methodPath();
     OutputStream output = fs.create(newFile);
     output.write(13);
     output.close();
@@ -564,14 +567,14 @@ public abstract class NativeAzureFileSystemBaseTest {
 
     // Don't check the file length for page blobs. Only block blobs
     // provide the actual length of bytes written.
-    if (!(this instanceof TestNativeAzureFSPageBlobLive)) {
+    if (!(this instanceof ITestNativeAzureFSPageBlobLive)) {
       assertEquals(1, newStatus.getLen());
     }
   }
 
   @Test
   public void testSetPermissionOnFolder() throws Exception {
-    Path newFolder = new Path("testPermission");
+    Path newFolder = methodPath();
     assertTrue(fs.mkdirs(newFolder));
     FsPermission newPermission = new FsPermission((short) 0600);
     fs.setPermission(newFolder, newPermission);
@@ -583,7 +586,7 @@ public abstract class NativeAzureFileSystemBaseTest {
 
   @Test
   public void testSetOwnerOnFile() throws Exception {
-    Path newFile = new Path("testOwner");
+    Path newFile = methodPath();
     OutputStream output = fs.create(newFile);
     output.write(13);
     output.close();
@@ -595,7 +598,7 @@ public abstract class NativeAzureFileSystemBaseTest {
 
     // File length is only reported to be the size of bytes written to the file for block blobs.
     // So only check it for block blobs, not page blobs.
-    if (!(this instanceof TestNativeAzureFSPageBlobLive)) {
+    if (!(this instanceof ITestNativeAzureFSPageBlobLive)) {
       assertEquals(1, newStatus.getLen());
     }
     fs.setOwner(newFile, null, "newGroup");
@@ -607,7 +610,7 @@ public abstract class NativeAzureFileSystemBaseTest {
 
   @Test
   public void testSetOwnerOnFolder() throws Exception {
-    Path newFolder = new Path("testOwner");
+    Path newFolder = methodPath();
     assertTrue(fs.mkdirs(newFolder));
     fs.setOwner(newFolder, "newUser", null);
     FileStatus newStatus = fs.getFileStatus(newFolder);
@@ -618,21 +621,21 @@ public abstract class NativeAzureFileSystemBaseTest {
 
   @Test
   public void testModifiedTimeForFile() throws Exception {
-    Path testFile = new Path("testFile");
+    Path testFile = methodPath();
     fs.create(testFile).close();
     testModifiedTime(testFile);
   }
 
   @Test
   public void testModifiedTimeForFolder() throws Exception {
-    Path testFolder = new Path("testFolder");
+    Path testFolder = methodPath();
     assertTrue(fs.mkdirs(testFolder));
     testModifiedTime(testFolder);
   }
 
   @Test
   public void testFolderLastModifiedTime() throws Exception {
-    Path parentFolder = new Path("testFolder");
+    Path parentFolder = methodPath();
     Path innerFile = new Path(parentFolder, "innerfile");
     assertTrue(fs.mkdirs(parentFolder));
 
@@ -846,6 +849,130 @@ public abstract class NativeAzureFileSystemBaseTest {
   }
 
   /**
+   * There is a nested folder and file under the folder to be renamed
+   * and the process crashes after the nested folder has been renamed but not the file.
+   * then when you list the parent folder, pending renames should be redone
+   * Apache jira HADOOP-12780
+   */
+  @Test
+  public void testRedoRenameFolderRenameInProgress() throws IOException {
+
+    // create original folder
+    String parent = "parent";
+    Path parentFolder = new Path(parent);
+    assertTrue(fs.mkdirs(parentFolder));
+    Path folderToBeRenamed = new Path(parentFolder, "folderToBeRenamed");
+    assertTrue(fs.mkdirs(folderToBeRenamed));
+    String innerFolderName = "innerFolder";
+    Path inner = new Path(folderToBeRenamed, innerFolderName);
+    assertTrue(fs.mkdirs(inner));
+    String innerFileName = "file";
+    Path innerFile = new Path(inner, innerFileName);
+    assertTrue(fs.createNewFile(innerFile));
+
+    Path renamedFolder = new Path(parentFolder, "renamedFolder");
+
+    // propose (but don't do) the rename of innerFolder2
+    Path home = fs.getHomeDirectory();
+    String relativeHomeDir = getRelativePath(home.toString());
+    NativeAzureFileSystem.FolderRenamePending pending =
+        new NativeAzureFileSystem.FolderRenamePending(
+            relativeHomeDir + "/" + folderToBeRenamed,
+            relativeHomeDir + "/" + renamedFolder, null,
+            (NativeAzureFileSystem) fs);
+
+    // Create a rename-pending file and write rename information to it.
+    final String renamePendingStr = folderToBeRenamed + FolderRenamePending.SUFFIX;
+    Path renamePendingFile = new Path(renamePendingStr);
+    FSDataOutputStream out = fs.create(renamePendingFile, true);
+    assertTrue(out != null);
+    writeString(out, pending.makeRenamePendingFileContents());
+
+    // Rename inner folder to simulate the scenario where rename has started and
+    // only one directory has been renamed but not the files under it
+    ((NativeAzureFileSystem) fs).getStoreInterface().rename(
+        relativeHomeDir + "/" +inner, relativeHomeDir + "/" +renamedFolder + "/" + innerFolderName , true, null);
+
+    // Instead of using fs.exist use store.explicitFileExists because fs.exist will return true
+    // even if directory has been renamed, but there are still file under that directory
+    assertFalse(((NativeAzureFileSystem) fs).getStoreInterface().
+        explicitFileExists(relativeHomeDir + "/" + inner)); // verify the explicit inner folder is gone
+    assertTrue(((NativeAzureFileSystem) fs).getStoreInterface().
+        explicitFileExists(relativeHomeDir + "/" + innerFile)); // verify inner file is present
+
+    // Redo the rename operation based on the contents of the
+    // -RenamePending.json file. Trigger the redo by checking for existence of
+    // the original folder. It must appear to not exist.
+    FileStatus[] listed = fs.listStatus(parentFolder);
+    assertEquals(1, listed.length);
+    assertTrue(listed[0].isDirectory());
+
+    // The rename pending file is not a directory, so at this point we know the
+    // redo has been done.
+    assertFalse(fs.exists(inner)); // verify original folder is gone
+    assertFalse(fs.exists(innerFile)); // verify original file is gone
+    assertTrue(fs.exists(renamedFolder)); // verify the target is there
+    assertTrue(fs.exists(new Path(renamedFolder, innerFolderName + "/" + innerFileName)));
+  }
+
+  /**
+   * Test the situation when the rename metadata file is empty
+   * i.e. it is created but not written yet. In that case in next rename
+   * this empty file should be deleted. As zero byte metadata file means
+   * rename has not started yet. This is to emulate the scenario where
+   * the process crashes just after creating rename metadata file.
+   *  We had a bug (HADOOP-12678) that in that case listing used to fail and
+   * hbase master did not use to come up
+   */
+  @Test
+  public void testRedoRenameFolderInFolderListingWithZeroByteRenameMetadata()
+      throws IOException {
+    // create original folder
+    String parent = "parent";
+    Path parentFolder = new Path(parent);
+    assertTrue(fs.mkdirs(parentFolder));
+    Path inner = new Path(parentFolder, "innerFolder");
+    assertTrue(fs.mkdirs(inner));
+    Path inner2 = new Path(parentFolder, "innerFolder2");
+    assertTrue(fs.mkdirs(inner2));
+    Path innerFile = new Path(inner2, "file");
+    assertTrue(fs.createNewFile(innerFile));
+
+    Path inner2renamed = new Path(parentFolder, "innerFolder2Renamed");
+
+    // Create an empty rename-pending file
+    final String renamePendingStr = inner2 + FolderRenamePending.SUFFIX;
+    Path renamePendingFile = new Path(renamePendingStr);
+    FSDataOutputStream out = fs.create(renamePendingFile, true);
+    assertTrue(out != null);
+    out.close();
+
+    // Redo the rename operation based on the contents of the
+    // -RenamePending.json file. Trigger the redo by listing
+    // the parent folder. It should not throw and it should
+    // delete empty rename pending file
+    FileStatus[] listed = fs.listStatus(parentFolder);
+    assertEquals(2, listed.length);
+    assertTrue(listed[0].isDirectory());
+    assertTrue(listed[1].isDirectory());
+    assertFalse(fs.exists(renamePendingFile));
+
+    // Verify that even if rename pending file is deleted,
+    // deletion should handle that
+    Path home = fs.getHomeDirectory();
+    String relativeHomeDir = getRelativePath(home.toString());
+    NativeAzureFileSystem.FolderRenamePending pending =
+            new NativeAzureFileSystem.FolderRenamePending(
+                relativeHomeDir + "/" + inner2,
+                relativeHomeDir + "/" + inner2renamed, null,
+                (NativeAzureFileSystem) fs);
+    pending.deleteRenamePendingFile(fs, renamePendingFile);
+
+    assertTrue(fs.exists(inner2)); // verify original folder is there
+    assertFalse(fs.exists(inner2renamed)); // verify the target is not there
+  }
+
+  /**
    * Test the situation where a rename pending file exists but the rename
    * is really done. This could happen if the rename process died just
    * before deleting the rename pending file. It exercises a non-standard
@@ -883,7 +1010,7 @@ public abstract class NativeAzureFileSystemBaseTest {
 
     // Make sure rename pending file is gone.
     FileStatus[] listed = fs.listStatus(new Path("/"));
-    assertEquals(1, listed.length);
+    assertEquals("Pending directory still found", 1, listed.length);
     assertTrue(listed[0].isDirectory());
   }
 
@@ -1332,7 +1459,6 @@ public abstract class NativeAzureFileSystemBaseTest {
     return (lastModified > (time - errorMargin) && lastModified < (time + errorMargin));
   }
 
-  @SuppressWarnings("deprecation")
   @Test
   public void testCreateNonRecursive() throws Exception {
     Path testFolder = new Path("/testFolder");
@@ -1582,7 +1708,7 @@ public abstract class NativeAzureFileSystemBaseTest {
           assertTrue("Unanticipated exception", false);
         }
       } else {
-        assertTrue("Unknown thread name", false);
+        fail("Unknown thread name");
       }
 
       LOG.info(name + " is exiting.");

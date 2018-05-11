@@ -23,8 +23,6 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -45,6 +43,8 @@ import org.apache.hadoop.mapreduce.CryptoUtils;
 import org.apache.hadoop.util.PriorityQueue;
 import org.apache.hadoop.util.Progress;
 import org.apache.hadoop.util.Progressable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Merger is an utility class used by the Map and Reduce tasks for merging
@@ -53,7 +53,7 @@ import org.apache.hadoop.util.Progressable;
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 public class Merger {  
-  private static final Log LOG = LogFactory.getLog(Merger.class);
+  private static final Logger LOG = LoggerFactory.getLogger(Merger.class);
 
   // Local directories
   private static LocalDirAllocator lDirAlloc = 
@@ -519,7 +519,7 @@ public class Merger {
       boolean hasNext = reader.nextRawKey();
       long endPos = reader.getReader().bytesRead;
       totalBytesProcessed += endPos - startPos;
-      mergeProgress.set(totalBytesProcessed * progPerByte);
+      mergeProgress.set(Math.min(1.0f, totalBytesProcessed * progPerByte));
       if (hasNext) {
         adjustTop();
       } else {
@@ -571,7 +571,7 @@ public class Merger {
       }
       long endPos = minSegment.getReader().bytesRead;
       totalBytesProcessed += endPos - startPos;
-      mergeProgress.set(totalBytesProcessed * progPerByte);
+      mergeProgress.set(Math.min(1.0f, totalBytesProcessed * progPerByte));
       return true;
     }
 
@@ -698,7 +698,7 @@ public class Merger {
           
           totalBytesProcessed += startBytes;         
           if (totalBytes != 0)
-            mergeProgress.set(totalBytesProcessed * progPerByte);
+            mergeProgress.set(Math.min(1.0f, totalBytesProcessed * progPerByte));
           else
             mergeProgress.set(1.0f); // Last pass and no segments left - we're done
           

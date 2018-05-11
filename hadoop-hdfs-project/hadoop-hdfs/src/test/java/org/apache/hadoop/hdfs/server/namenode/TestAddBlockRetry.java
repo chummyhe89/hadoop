@@ -66,6 +66,7 @@ public class TestAddBlockRetry {
   public void tearDown() throws Exception {
     if (cluster != null) {
       cluster.shutdown();
+      cluster = null;
     }
   }
 
@@ -84,7 +85,7 @@ public class TestAddBlockRetry {
     nn.create(src, FsPermission.getFileDefault(),
         "clientName",
         new EnumSetWritable<CreateFlag>(EnumSet.of(CreateFlag.CREATE)),
-        true, (short)3, 1024, null);
+        true, (short)3, 1024, null, null);
 
     // start first addBlock()
     LOG.info("Starting first addBlock for " + src);
@@ -100,13 +101,13 @@ public class TestAddBlockRetry {
       ns.readUnlock();;
     }
     DatanodeStorageInfo targets[] = FSDirWriteFileOp.chooseTargetForNewBlock(
-        ns.getBlockManager(), src, null, null, r);
+        ns.getBlockManager(), src, null, null, null, r);
     assertNotNull("Targets must be generated", targets);
 
     // run second addBlock()
     LOG.info("Starting second addBlock for " + src);
     nn.addBlock(src, "clientName", null, null,
-                HdfsConstants.GRANDFATHER_INODE_ID, null);
+                HdfsConstants.GRANDFATHER_INODE_ID, null, null);
     assertTrue("Penultimate block must be complete",
                checkFileProgress(src, false));
     LocatedBlocks lbs = nn.getBlockLocations(src, 0, Long.MAX_VALUE);
@@ -156,18 +157,18 @@ public class TestAddBlockRetry {
     // create file
     nameNodeRpc.create(src, FsPermission.getFileDefault(), "clientName",
         new EnumSetWritable<CreateFlag>(EnumSet.of(CreateFlag.CREATE)), true,
-        (short) 3, 1024, null);
+        (short) 3, 1024, null, null);
     // start first addBlock()
     LOG.info("Starting first addBlock for " + src);
     LocatedBlock lb1 = nameNodeRpc.addBlock(src, "clientName", null, null,
-        HdfsConstants.GRANDFATHER_INODE_ID, null);
+        HdfsConstants.GRANDFATHER_INODE_ID, null, null);
     assertTrue("Block locations should be present",
         lb1.getLocations().length > 0);
 
     cluster.restartNameNode();
     nameNodeRpc = cluster.getNameNodeRpc();
     LocatedBlock lb2 = nameNodeRpc.addBlock(src, "clientName", null, null,
-        HdfsConstants.GRANDFATHER_INODE_ID, null);
+        HdfsConstants.GRANDFATHER_INODE_ID, null, null);
     assertEquals("Blocks are not equal", lb1.getBlock(), lb2.getBlock());
     assertTrue("Wrong locations with retry", lb2.getLocations().length > 0);
   }

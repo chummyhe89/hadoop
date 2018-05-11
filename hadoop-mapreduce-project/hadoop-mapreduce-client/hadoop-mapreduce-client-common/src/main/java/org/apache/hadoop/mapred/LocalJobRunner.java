@@ -32,15 +32,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.crypto.KeyGenerator;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -74,13 +71,16 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.ReflectionUtils;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.hadoop.util.concurrent.HadoopExecutors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Implements MapReduce locally, in-process, for debugging. */
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 public class LocalJobRunner implements ClientProtocol {
-  public static final Log LOG =
-    LogFactory.getLog(LocalJobRunner.class);
+  public static final Logger LOG =
+      LoggerFactory.getLogger(LocalJobRunner.class);
 
   /** The maximum number of map tasks to run in parallel in LocalJobRunner */
   public static final String LOCAL_MAX_MAPS =
@@ -169,7 +169,7 @@ public class LocalJobRunner implements ClientProtocol {
       // Manage the distributed cache.  If there are files to be copied,
       // this will trigger localFile to be re-written again.
       localDistributedCacheManager = new LocalDistributedCacheManager();
-      localDistributedCacheManager.setup(conf);
+      localDistributedCacheManager.setup(conf, jobid);
       
       // Write out configuration file.  Instead of copying it from
       // systemJobFile, we re-write it, since setup(), above, may have
@@ -428,7 +428,8 @@ public class LocalJobRunner implements ClientProtocol {
       ThreadFactory tf = new ThreadFactoryBuilder()
         .setNameFormat("LocalJobRunner Map Task Executor #%d")
         .build();
-      ExecutorService executor = Executors.newFixedThreadPool(maxMapThreads, tf);
+      ExecutorService executor = HadoopExecutors.newFixedThreadPool(
+          maxMapThreads, tf);
 
       return executor;
     }
@@ -454,7 +455,8 @@ public class LocalJobRunner implements ClientProtocol {
       LOG.debug("Reduce tasks to process: " + this.numReduceTasks);
 
       // Create a new executor service to drain the work queue.
-      ExecutorService executor = Executors.newFixedThreadPool(maxReduceThreads);
+      ExecutorService executor = HadoopExecutors.newFixedThreadPool(
+          maxReduceThreads);
 
       return executor;
     }
@@ -585,7 +587,7 @@ public class LocalJobRunner implements ClientProtocol {
         } else {
           this.status.setRunState(JobStatus.FAILED);
         }
-        LOG.warn(id, t);
+        LOG.warn(id.toString(), t);
 
         JobEndNotifier.localRunnerNotification(job, status);
 
@@ -719,17 +721,17 @@ public class LocalJobRunner implements ClientProtocol {
     @Override
     public synchronized void fsError(TaskAttemptID taskId, String message) 
     throws IOException {
-      LOG.fatal("FSError: "+ message + "from task: " + taskId);
+      LOG.error("FSError: "+ message + "from task: " + taskId);
     }
 
     @Override
     public void shuffleError(TaskAttemptID taskId, String message) throws IOException {
-      LOG.fatal("shuffleError: "+ message + "from task: " + taskId);
+      LOG.error("shuffleError: "+ message + "from task: " + taskId);
     }
     
-    public synchronized void fatalError(TaskAttemptID taskId, String msg) 
+    public synchronized void fatalError(TaskAttemptID taskId, String msg, boolean fastFail)
     throws IOException {
-      LOG.fatal("Fatal: "+ msg + "from task: " + taskId);
+      LOG.error("Fatal: "+ msg + " from task: " + taskId + " fast fail: " + fastFail);
     }
     
     @Override
@@ -766,7 +768,7 @@ public class LocalJobRunner implements ClientProtocol {
   public LocalJobRunner(JobConf conf) throws IOException {
     this.fs = FileSystem.getLocal(conf);
     this.conf = conf;
-    myMetrics = new LocalJobRunnerMetrics(new JobConf(conf));
+    myMetrics = LocalJobRunnerMetrics.create();
   }
 
   // JobSubmissionProtocol methods

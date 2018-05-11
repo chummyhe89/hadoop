@@ -19,15 +19,17 @@ package org.apache.hadoop.hdfs.server.datanode.fsdataset.impl;
 
 import java.io.BufferedWriter;
 import java.io.File;
-import java.io.FileOutputStream;
+import java.io.FileInputStream;
 import java.io.FilenameFilter;
 import java.io.IOException;
-import java.nio.channels.ClosedChannelException;
 import java.io.OutputStreamWriter;
-import java.nio.file.Files;
+import java.io.RandomAccessFile;
+import java.net.URI;
+import java.nio.channels.ClosedChannelException;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.Collections;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -40,34 +42,55 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Joiner;
-import com.google.common.base.Preconditions;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.DF;
-import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdfs.server.datanode.FileIoProvider;
+import org.apache.hadoop.hdfs.server.datanode.BlockMetadataHeader;
+import org.apache.hadoop.hdfs.server.datanode.checker.VolumeCheckResult;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.DataNodeVolumeMetrics;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
+import org.apache.hadoop.hdfs.server.datanode.FinalizedReplica;
+import org.apache.hadoop.hdfs.server.datanode.ReplicaBeingWritten;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.server.datanode.DataStorage;
 import org.apache.hadoop.hdfs.server.datanode.DatanodeUtil;
+import org.apache.hadoop.hdfs.server.datanode.LocalReplica;
+import org.apache.hadoop.hdfs.server.datanode.ReplicaInfo;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.ReplicaState;
+import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
+import org.apache.hadoop.util.DataChecksum;
+import org.apache.hadoop.util.DiskChecker.DiskOutOfSpaceException;
+import org.apache.hadoop.hdfs.server.datanode.ReplicaBuilder;
+import org.apache.hadoop.hdfs.server.datanode.LocalReplicaInPipeline;
+import org.apache.hadoop.hdfs.server.datanode.ReplicaInPipeline;
+import org.apache.hadoop.hdfs.server.datanode.StorageLocation;
+import org.apache.hadoop.hdfs.server.datanode.DirectoryScanner.BlockDirFilter;
+import org.apache.hadoop.hdfs.server.datanode.DirectoryScanner.ReportCompiler;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeReference;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.RamDiskReplicaTracker.RamDiskReplica;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.util.CloseableReferenceCount;
-import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.DiskChecker.DiskErrorException;
-
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.hadoop.util.Time;
-import org.codehaus.jackson.annotate.JsonProperty;
-import org.codehaus.jackson.map.ObjectMapper;
+import org.apache.hadoop.util.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.fasterxml.jackson.databind.ObjectWriter;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Joiner;
+import com.google.common.base.Preconditions;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /**
  * The underlying volume used to store replica.
@@ -79,24 +102,37 @@ import org.slf4j.LoggerFactory;
 public class FsVolumeImpl implements FsVolumeSpi {
   public static final Logger LOG =
       LoggerFactory.getLogger(FsVolumeImpl.class);
+  private static final ObjectWriter WRITER =
+      new ObjectMapper().writerWithDefaultPrettyPrinter();
+  private static final ObjectReader READER =
+      new ObjectMapper().readerFor(BlockIteratorState.class);
 
   private final FsDatasetImpl dataset;
   private final String storageID;
   private final StorageType storageType;
   private final Map<String, BlockPoolSlice> bpSlices
       = new ConcurrentHashMap<String, BlockPoolSlice>();
+
+  // Refers to the base StorageLocation used to construct this volume
+  // (i.e., does not include STORAGE_DIR_CURRENT in
+  // <location>/STORAGE_DIR_CURRENT/)
+  private final StorageLocation storageLocation;
+
   private final File currentDir;    // <StorageDirectory>/current
-  private final DF usage;           
-  private final long reserved;
+  private final DF usage;
+  private final ReservedSpaceCalculator reserved;
   private CloseableReferenceCount reference = new CloseableReferenceCount();
 
-  // Disk space reserved for open blocks.
-  private AtomicLong reservedForRbw;
-
+  // Disk space reserved for blocks (RBW or Re-replicating) open for write.
+  private AtomicLong reservedForReplicas;
+  private long recentReserved = 0;
+  private final Configuration conf;
   // Capacity configured. This is useful when we want to
   // limit the visible capacity for tests. If negative, then we just
   // query from the filesystem.
   protected volatile long configuredCapacity;
+  private final FileIoProvider fileIoProvider;
+  private final DataNodeVolumeMetrics metrics;
 
   /**
    * Per-volume worker pool that processes new blocks to cache.
@@ -105,21 +141,41 @@ public class FsVolumeImpl implements FsVolumeSpi {
    * contention.
    */
   protected ThreadPoolExecutor cacheExecutor;
-  
-  FsVolumeImpl(FsDatasetImpl dataset, String storageID, File currentDir,
-      Configuration conf, StorageType storageType) throws IOException {
+
+  FsVolumeImpl(FsDatasetImpl dataset, String storageID, StorageDirectory sd,
+      FileIoProvider fileIoProvider, Configuration conf) throws IOException {
+    // outside tests, usage created in ReservedSpaceCalculator.Builder
+    this(dataset, storageID, sd, fileIoProvider, conf, null);
+  }
+
+  FsVolumeImpl(FsDatasetImpl dataset, String storageID, StorageDirectory sd,
+      FileIoProvider fileIoProvider, Configuration conf, DF usage)
+      throws IOException {
+
+    if (sd.getStorageLocation() == null) {
+      throw new IOException("StorageLocation specified for storage directory " +
+          sd + " is null");
+    }
     this.dataset = dataset;
     this.storageID = storageID;
-    this.reserved = conf.getLong(
-        DFSConfigKeys.DFS_DATANODE_DU_RESERVED_KEY,
-        DFSConfigKeys.DFS_DATANODE_DU_RESERVED_DEFAULT);
-    this.reservedForRbw = new AtomicLong(0L);
-    this.currentDir = currentDir; 
-    File parent = currentDir.getParentFile();
-    this.usage = new DF(parent, conf);
-    this.storageType = storageType;
+    this.reservedForReplicas = new AtomicLong(0L);
+    this.storageLocation = sd.getStorageLocation();
+    this.currentDir = sd.getCurrentDir();
+    this.storageType = storageLocation.getStorageType();
     this.configuredCapacity = -1;
-    cacheExecutor = initializeCacheExecutor(parent);
+    this.usage = usage;
+    if (currentDir != null) {
+      File parent = currentDir.getParentFile();
+      cacheExecutor = initializeCacheExecutor(parent);
+      this.metrics = DataNodeVolumeMetrics.create(conf, parent.getPath());
+    } else {
+      cacheExecutor = null;
+      this.metrics = null;
+    }
+    this.conf = conf;
+    this.fileIoProvider = fileIoProvider;
+    this.reserved = new ReservedSpaceCalculator.Builder(conf)
+        .setUsage(usage).setStorageType(storageType).build();
   }
 
   protected ThreadPoolExecutor initializeCacheExecutor(File parent) {
@@ -232,84 +288,101 @@ public class FsVolumeImpl implements FsVolumeSpi {
     Preconditions.checkState(reference.getReferenceCount() > 0);
   }
 
+  @VisibleForTesting
+  int getReferenceCount() {
+    return this.reference.getReferenceCount();
+  }
+
   /**
-   * Close this volume and wait all other threads to release the reference count
-   * on this volume.
-   * @throws IOException if the volume is closed or the waiting is interrupted.
+   * Close this volume.
+   * @throws IOException if the volume is closed.
    */
-  void closeAndWait() throws IOException {
+  void setClosed() throws IOException {
     try {
       this.reference.setClosed();
+      dataset.stopAllDataxceiverThreads(this);
     } catch (ClosedChannelException e) {
       throw new IOException("The volume has already closed.", e);
     }
-    final int SLEEP_MILLIS = 500;
-    while (this.reference.getReferenceCount() > 0) {
+  }
+
+  /**
+   * Check whether this volume has successfully been closed.
+   */
+  boolean checkClosed() {
+    if (this.reference.getReferenceCount() > 0) {
       if (FsDatasetImpl.LOG.isDebugEnabled()) {
         FsDatasetImpl.LOG.debug(String.format(
             "The reference count for %s is %d, wait to be 0.",
             this, reference.getReferenceCount()));
       }
-      try {
-        Thread.sleep(SLEEP_MILLIS);
-      } catch (InterruptedException e) {
-        throw new IOException(e);
-      }
+      return false;
     }
+    return true;
   }
 
+  @VisibleForTesting
   File getCurrentDir() {
     return currentDir;
   }
   
-  File getRbwDir(String bpid) throws IOException {
+  protected File getRbwDir(String bpid) throws IOException {
     return getBlockPoolSlice(bpid).getRbwDir();
   }
 
-  File getLazyPersistDir(String bpid) throws IOException {
+  protected File getLazyPersistDir(String bpid) throws IOException {
     return getBlockPoolSlice(bpid).getLazypersistDir();
   }
 
-  File getTmpDir(String bpid) throws IOException {
+  protected File getTmpDir(String bpid) throws IOException {
     return getBlockPoolSlice(bpid).getTmpDir();
   }
 
   void onBlockFileDeletion(String bpid, long value) {
-    decDfsUsed(bpid, value);
+    decDfsUsedAndNumBlocks(bpid, value, true);
     if (isTransientStorage()) {
       dataset.releaseLockedMemory(value, true);
     }
   }
 
   void onMetaFileDeletion(String bpid, long value) {
-    decDfsUsed(bpid, value);
+    decDfsUsedAndNumBlocks(bpid, value, false);
   }
 
-  private void decDfsUsed(String bpid, long value) {
-    synchronized(dataset) {
-      BlockPoolSlice bp = bpSlices.get(bpid);
-      if (bp != null) {
-        bp.decDfsUsed(value);
+  private void decDfsUsedAndNumBlocks(String bpid, long value,
+                                      boolean blockFileDeleted) {
+    // BlockPoolSlice map is thread safe, and update the space used or
+    // number of blocks are atomic operations, so it doesn't require to
+    // hold the dataset lock.
+    BlockPoolSlice bp = bpSlices.get(bpid);
+    if (bp != null) {
+      bp.decDfsUsed(value);
+      if (blockFileDeleted) {
+        bp.decrNumBlocks();
       }
     }
   }
 
+  void incDfsUsedAndNumBlocks(String bpid, long value) {
+    BlockPoolSlice bp = bpSlices.get(bpid);
+    if (bp != null) {
+      bp.incDfsUsed(value);
+      bp.incrNumBlocks();
+    }
+  }
+
   void incDfsUsed(String bpid, long value) {
-    synchronized(dataset) {
-      BlockPoolSlice bp = bpSlices.get(bpid);
-      if (bp != null) {
-        bp.incDfsUsed(value);
-      }
+    BlockPoolSlice bp = bpSlices.get(bpid);
+    if (bp != null) {
+      bp.incDfsUsed(value);
     }
   }
 
   @VisibleForTesting
   public long getDfsUsed() throws IOException {
     long dfsUsed = 0;
-    synchronized(dataset) {
-      for(BlockPoolSlice s : bpSlices.values()) {
-        dfsUsed += s.getDfsUsed();
-      }
+    for(BlockPoolSlice s : bpSlices.values()) {
+      dfsUsed += s.getDfsUsed();
     }
     return dfsUsed;
   }
@@ -328,7 +401,7 @@ public class FsVolumeImpl implements FsVolumeSpi {
   @VisibleForTesting
   public long getCapacity() {
     if (configuredCapacity < 0) {
-      long remaining = usage.getCapacity() - reserved;
+      long remaining = usage.getCapacity() - getReserved();
       return remaining > 0 ? remaining : 0;
     }
 
@@ -353,23 +426,64 @@ public class FsVolumeImpl implements FsVolumeSpi {
    */
   @Override
   public long getAvailable() throws IOException {
-    long remaining = getCapacity() - getDfsUsed() - reservedForRbw.get();
-    long available = usage.getAvailable() - reserved - reservedForRbw.get();
+    long remaining = getCapacity() - getDfsUsed() - getReservedForReplicas();
+    long available = usage.getAvailable()  - getRemainingReserved()
+        - getReservedForReplicas();
     if (remaining > available) {
       remaining = available;
     }
     return (remaining > 0) ? remaining : 0;
   }
 
-  @VisibleForTesting
-  public long getReservedForRbw() {
-    return reservedForRbw.get();
-  }
-    
-  long getReserved(){
-    return reserved;
+  long getActualNonDfsUsed() throws IOException {
+    return usage.getUsed() - getDfsUsed();
   }
 
+  private long getRemainingReserved() throws IOException {
+    long actualNonDfsUsed = getActualNonDfsUsed();
+    long actualReserved = getReserved();
+    if (actualNonDfsUsed < actualReserved) {
+      return actualReserved - actualNonDfsUsed;
+    }
+    return 0L;
+  }
+
+  /**
+   * Unplanned Non-DFS usage, i.e. Extra usage beyond reserved.
+   *
+   * @return Disk usage excluding space used by HDFS and excluding space
+   * reserved for blocks open for write.
+   * @throws IOException
+   */
+  public long getNonDfsUsed() throws IOException {
+    long actualNonDfsUsed = getActualNonDfsUsed();
+    long actualReserved = getReserved();
+    if (actualNonDfsUsed < actualReserved) {
+      return 0L;
+    }
+    return actualNonDfsUsed - actualReserved;
+  }
+
+  @VisibleForTesting
+  long getDfAvailable() {
+    return usage.getAvailable();
+  }
+
+  @VisibleForTesting
+  public long getReservedForReplicas() {
+    return reservedForReplicas.get();
+  }
+
+  @VisibleForTesting
+  long getRecentReserved() {
+    return recentReserved;
+  }
+
+  long getReserved(){
+    return reserved.getReserved();
+  }
+
+  @VisibleForTesting
   BlockPoolSlice getBlockPoolSlice(String bpid) throws IOException {
     BlockPoolSlice bp = bpSlices.get(bpid);
     if (bp == null) {
@@ -379,21 +493,33 @@ public class FsVolumeImpl implements FsVolumeSpi {
   }
 
   @Override
-  public String getBasePath() {
-    return currentDir.getParent();
+  public URI getBaseURI() {
+    return new File(currentDir.getParent()).toURI();
   }
-  
+
+  @Override
+  public DF getUsageStats(Configuration conf) {
+    if (currentDir != null) {
+      try {
+        return new DF(new File(currentDir.getParent()), conf);
+      } catch (IOException e) {
+        LOG.error("Unable to get disk statistics for volume " + this);
+      }
+    }
+    return null;
+  }
+
+  @Override
+  public StorageLocation getStorageLocation() {
+    return storageLocation;
+  }
+
   @Override
   public boolean isTransientStorage() {
     return storageType.isTransient();
   }
 
-  @Override
-  public String getPath(String bpid) throws IOException {
-    return getBlockPoolSlice(bpid).getDirectory().getAbsolutePath();
-  }
-
-  @Override
+  @VisibleForTesting
   public File getFinalizedDir(String bpid) throws IOException {
     return getBlockPoolSlice(bpid).getFinalizedDir();
   }
@@ -405,20 +531,27 @@ public class FsVolumeImpl implements FsVolumeSpi {
   public String[] getBlockPoolList() {
     return bpSlices.keySet().toArray(new String[bpSlices.keySet().size()]);   
   }
-    
+
   /**
    * Temporary files. They get moved to the finalized block directory when
    * the block is finalized.
    */
   File createTmpFile(String bpid, Block b) throws IOException {
     checkReference();
-    return getBlockPoolSlice(bpid).createTmpFile(b);
+    reserveSpaceForReplica(b.getNumBytes());
+    try {
+      return getBlockPoolSlice(bpid).createTmpFile(b);
+    } catch (IOException exception) {
+      releaseReservedSpace(b.getNumBytes());
+      throw exception;
+    }
   }
 
   @Override
-  public void reserveSpaceForRbw(long bytesToReserve) {
+  public void reserveSpaceForReplica(long bytesToReserve) {
     if (bytesToReserve != 0) {
-      reservedForRbw.addAndGet(bytesToReserve);
+      reservedForReplicas.addAndGet(bytesToReserve);
+      recentReserved = bytesToReserve;
     }
   }
 
@@ -428,14 +561,15 @@ public class FsVolumeImpl implements FsVolumeSpi {
 
       long oldReservation, newReservation;
       do {
-        oldReservation = reservedForRbw.get();
+        oldReservation = reservedForReplicas.get();
         newReservation = oldReservation - bytesToRelease;
         if (newReservation < 0) {
-          // Failsafe, this should never occur in practice, but if it does we don't
-          // want to start advertising more space than we have available.
+          // Failsafe, this should never occur in practice, but if it does we
+          // don't want to start advertising more space than we have available.
           newReservation = 0;
         }
-      } while (!reservedForRbw.compareAndSet(oldReservation, newReservation));
+      } while (!reservedForReplicas.compareAndSet(oldReservation,
+          newReservation));
     }
   }
 
@@ -541,8 +675,8 @@ public class FsVolumeImpl implements FsVolumeSpi {
      */
     private String getNextSubDir(String prev, File dir)
           throws IOException {
-      List<String> children =
-          IOUtils.listDirectory(dir, SubdirFilter.INSTANCE);
+      List<String> children = fileIoProvider.listDirectory(
+          FsVolumeImpl.this, dir, SubdirFilter.INSTANCE);
       cache = null;
       cacheMs = 0;
       if (children.size() == 0) {
@@ -595,8 +729,8 @@ public class FsVolumeImpl implements FsVolumeSpi {
       }
       File dir = Paths.get(bpidDir.getAbsolutePath(), "current", "finalized",
                     state.curFinalizedDir, state.curFinalizedSubDir).toFile();
-      List<String> entries =
-          IOUtils.listDirectory(dir, BlockFileFilter.INSTANCE);
+      List<String> entries = fileIoProvider.listDirectory(
+          FsVolumeImpl.this, dir, BlockFileFilter.INSTANCE);
       if (entries.size() == 0) {
         entries = null;
       } else {
@@ -654,6 +788,25 @@ public class FsVolumeImpl implements FsVolumeSpi {
             } else {
               ExtendedBlock block =
                   new ExtendedBlock(bpid, Block.filename2id(state.curEntry));
+              File expectedBlockDir = DatanodeUtil.idToBlockDir(
+                  new File("."), block.getBlockId());
+              File actualBlockDir = Paths.get(".",
+                  state.curFinalizedDir, state.curFinalizedSubDir).toFile();
+              if (!expectedBlockDir.equals(actualBlockDir)) {
+                LOG.error("nextBlock({}, {}): block id {} found in invalid " +
+                    "directory.  Expected directory: {}.  " +
+                    "Actual directory: {}", storageID, bpid,
+                    block.getBlockId(), expectedBlockDir.getPath(),
+                    actualBlockDir.getPath());
+                continue;
+              }
+
+              File blkFile = getBlockFile(bpid, block);
+              File metaFile = FsDatasetUtil.findMetaFile(blkFile);
+              block.setGenerationStamp(
+                  Block.getGenerationStamp(metaFile.getName()));
+              block.setNumBytes(blkFile.length());
+
               LOG.trace("nextBlock({}, {}): advancing to {}",
                   storageID, bpid, block);
               return block;
@@ -675,6 +828,12 @@ public class FsVolumeImpl implements FsVolumeSpi {
       }
     }
 
+    private File getBlockFile(String bpid, ExtendedBlock blk)
+        throws IOException {
+      return new File(DatanodeUtil.idToBlockDir(getFinalizedDir(bpid),
+          blk.getBlockId()).toString() + "/" + blk.getBlockName());
+    }
+
     @Override
     public boolean atEnd() {
       return state.atEnd;
@@ -691,34 +850,31 @@ public class FsVolumeImpl implements FsVolumeSpi {
     public void save() throws IOException {
       state.lastSavedMs = Time.now();
       boolean success = false;
-      ObjectMapper mapper = new ObjectMapper();
-      try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(
-                new FileOutputStream(getTempSaveFile(), false), "UTF-8"))) {
-        mapper.writerWithDefaultPrettyPrinter().writeValue(writer, state);
+      try (BufferedWriter writer = new BufferedWriter(
+          new OutputStreamWriter(fileIoProvider.getFileOutputStream(
+              FsVolumeImpl.this, getTempSaveFile()), "UTF-8"))) {
+        WRITER.writeValue(writer, state);
         success = true;
       } finally {
         if (!success) {
-          if (getTempSaveFile().delete()) {
-            LOG.debug("save({}, {}): error deleting temporary file.",
-                storageID, bpid);
-          }
+          fileIoProvider.delete(FsVolumeImpl.this, getTempSaveFile());
         }
       }
-      Files.move(getTempSaveFile().toPath(), getSaveFile().toPath(),
+      fileIoProvider.move(FsVolumeImpl.this,
+          getTempSaveFile().toPath(), getSaveFile().toPath(),
           StandardCopyOption.ATOMIC_MOVE);
       if (LOG.isTraceEnabled()) {
         LOG.trace("save({}, {}): saved {}", storageID, bpid,
-            mapper.writerWithDefaultPrettyPrinter().writeValueAsString(state));
+            WRITER.writeValueAsString(state));
       }
     }
 
     public void load() throws IOException {
-      ObjectMapper mapper = new ObjectMapper();
       File file = getSaveFile();
-      this.state = mapper.reader(BlockIteratorState.class).readValue(file);
+      this.state = READER.readValue(file);
       LOG.trace("load({}, {}): loaded iterator {} from {}: {}", storageID,
           bpid, name, file.getAbsoluteFile(),
-          mapper.writerWithDefaultPrettyPrinter().writeValueAsString(state));
+          WRITER.writeValueAsString(state));
     }
 
     File getSaveFile() {
@@ -769,7 +925,7 @@ public class FsVolumeImpl implements FsVolumeSpi {
   }
 
   @Override
-  public FsDatasetSpi getDataset() {
+  public FsDatasetSpi<? extends FsVolumeSpi> getDataset() {
     return dataset;
   }
 
@@ -779,7 +935,7 @@ public class FsVolumeImpl implements FsVolumeSpi {
    */
   File createRbwFile(String bpid, Block b) throws IOException {
     checkReference();
-    reserveSpaceForRbw(b.getNumBytes());
+    reserveSpaceForReplica(b.getNumBytes());
     try {
       return getBlockPoolSlice(bpid).createRbwFile(b);
     } catch (IOException exception) {
@@ -790,28 +946,47 @@ public class FsVolumeImpl implements FsVolumeSpi {
 
   /**
    *
-   * @param bytesReservedForRbw Space that was reserved during
+   * @param bytesReserved Space that was reserved during
    *     block creation. Now that the block is being finalized we
    *     can free up this space.
    * @return
    * @throws IOException
    */
-  File addFinalizedBlock(String bpid, Block b,
-                         File f, long bytesReservedForRbw)
-      throws IOException {
-    releaseReservedSpace(bytesReservedForRbw);
-    return getBlockPoolSlice(bpid).addFinalizedBlock(b, f);
+  ReplicaInfo addFinalizedBlock(String bpid, Block b, ReplicaInfo replicaInfo,
+      long bytesReserved) throws IOException {
+    releaseReservedSpace(bytesReserved);
+    File dest = getBlockPoolSlice(bpid).addFinalizedBlock(b, replicaInfo);
+    byte[] checksum = null;
+    // copy the last partial checksum if the replica is originally
+    // in finalized or rbw state.
+    if (replicaInfo.getState() == ReplicaState.FINALIZED) {
+      FinalizedReplica finalized = (FinalizedReplica)replicaInfo;
+      checksum = finalized.getLastPartialChunkChecksum();
+    } else if (replicaInfo.getState() == ReplicaState.RBW) {
+      ReplicaBeingWritten rbw = (ReplicaBeingWritten)replicaInfo;
+      checksum = rbw.getLastChecksumAndDataLen().getChecksum();
+    }
+
+    return new ReplicaBuilder(ReplicaState.FINALIZED)
+        .setBlock(replicaInfo)
+        .setFsVolume(this)
+        .setDirectoryToUse(dest.getParentFile())
+        .setLastPartialChunkChecksum(checksum)
+        .build();
   }
 
   Executor getCacheExecutor() {
     return cacheExecutor;
   }
 
-  void checkDirs() throws DiskErrorException {
+  @Override
+  public VolumeCheckResult check(VolumeCheckContext ignored)
+      throws DiskErrorException {
     // TODO:FEDERATION valid synchronization
     for(BlockPoolSlice s : bpSlices.values()) {
       s.checkDirs();
     }
+    return VolumeCheckResult.HEALTHY;
   }
     
   void getVolumeMap(ReplicaMap volumeMap,
@@ -827,10 +1002,18 @@ public class FsVolumeImpl implements FsVolumeSpi {
       throws IOException {
     getBlockPoolSlice(bpid).getVolumeMap(volumeMap, ramDiskReplicaMap);
   }
-  
+
+  long getNumBlocks() {
+    long numBlocks = 0;
+    for (BlockPoolSlice s : bpSlices.values()) {
+      numBlocks += s.getNumOfBlocks();
+    }
+    return numBlocks;
+  }
+
   @Override
   public String toString() {
-    return currentDir.getAbsolutePath();
+    return currentDir != null ? currentDir.getParent() : "NULL";
   }
 
   void shutdown() {
@@ -841,11 +1024,24 @@ public class FsVolumeImpl implements FsVolumeSpi {
     for (Entry<String, BlockPoolSlice> entry : set) {
       entry.getValue().shutdown(null);
     }
+    if (metrics != null) {
+      metrics.unRegister();
+    }
   }
 
-  void addBlockPool(String bpid, Configuration conf) throws IOException {
+  void addBlockPool(String bpid, Configuration c) throws IOException {
+    addBlockPool(bpid, c, null);
+  }
+
+  void addBlockPool(String bpid, Configuration c, Timer timer)
+      throws IOException {
     File bpdir = new File(currentDir, bpid);
-    BlockPoolSlice bp = new BlockPoolSlice(bpid, this, bpdir, conf);
+    BlockPoolSlice bp;
+    if (timer == null) {
+      bp = new BlockPoolSlice(bpid, this, bpdir, c, new Timer());
+    } else {
+      bp = new BlockPoolSlice(bpid, this, bpdir, c, timer);
+    }
     bpSlices.put(bpid, bp);
   }
   
@@ -864,11 +1060,12 @@ public class FsVolumeImpl implements FsVolumeSpi {
     File finalizedDir = new File(bpCurrentDir,
         DataStorage.STORAGE_DIR_FINALIZED);
     File rbwDir = new File(bpCurrentDir, DataStorage.STORAGE_DIR_RBW);
-    if (finalizedDir.exists() && !DatanodeUtil.dirNoFilesRecursive(
-        finalizedDir)) {
+    if (fileIoProvider.exists(this, finalizedDir) &&
+        !DatanodeUtil.dirNoFilesRecursive(this, finalizedDir, fileIoProvider)) {
       return false;
     }
-    if (rbwDir.exists() && FileUtil.list(rbwDir).length != 0) {
+    if (fileIoProvider.exists(this, rbwDir) &&
+        fileIoProvider.list(this, rbwDir).length != 0) {
       return false;
     }
     return true;
@@ -889,35 +1086,38 @@ public class FsVolumeImpl implements FsVolumeSpi {
         DataStorage.STORAGE_DIR_LAZY_PERSIST);
     File rbwDir = new File(bpCurrentDir, DataStorage.STORAGE_DIR_RBW);
     if (force) {
-      FileUtil.fullyDelete(bpDir);
+      fileIoProvider.fullyDelete(this, bpDir);
     } else {
-      if (!rbwDir.delete()) {
+      if (!fileIoProvider.delete(this, rbwDir)) {
         throw new IOException("Failed to delete " + rbwDir);
       }
-      if (!DatanodeUtil.dirNoFilesRecursive(finalizedDir) ||
-          !FileUtil.fullyDelete(finalizedDir)) {
+      if (!DatanodeUtil.dirNoFilesRecursive(
+              this, finalizedDir, fileIoProvider) ||
+          !fileIoProvider.fullyDelete(
+              this, finalizedDir)) {
         throw new IOException("Failed to delete " + finalizedDir);
       }
       if (lazypersistDir.exists() &&
-        ((!DatanodeUtil.dirNoFilesRecursive(lazypersistDir) ||
-          !FileUtil.fullyDelete(lazypersistDir)))) {
+          ((!DatanodeUtil.dirNoFilesRecursive(
+              this, lazypersistDir, fileIoProvider) ||
+              !fileIoProvider.fullyDelete(this, lazypersistDir)))) {
         throw new IOException("Failed to delete " + lazypersistDir);
       }
-      FileUtil.fullyDelete(tmpDir);
-      for (File f : FileUtil.listFiles(bpCurrentDir)) {
-        if (!f.delete()) {
+      fileIoProvider.fullyDelete(this, tmpDir);
+      for (File f : fileIoProvider.listFiles(this, bpCurrentDir)) {
+        if (!fileIoProvider.delete(this, f)) {
           throw new IOException("Failed to delete " + f);
         }
       }
-      if (!bpCurrentDir.delete()) {
+      if (!fileIoProvider.delete(this, bpCurrentDir)) {
         throw new IOException("Failed to delete " + bpCurrentDir);
       }
-      for (File f : FileUtil.listFiles(bpDir)) {
-        if (!f.delete()) {
+      for (File f : fileIoProvider.listFiles(this, bpDir)) {
+        if (!fileIoProvider.delete(this, f)) {
           throw new IOException("Failed to delete " + f);
         }
       }
-      if (!bpDir.delete()) {
+      if (!fileIoProvider.delete(this, bpDir)) {
         throw new IOException("Failed to delete " + bpDir);
       }
     }
@@ -936,5 +1136,352 @@ public class FsVolumeImpl implements FsVolumeSpi {
   DatanodeStorage toDatanodeStorage() {
     return new DatanodeStorage(storageID, DatanodeStorage.State.NORMAL, storageType);
   }
-}
 
+
+  @Override
+  public byte[] loadLastPartialChunkChecksum(
+      File blockFile, File metaFile) throws IOException {
+    // readHeader closes the temporary FileInputStream.
+    DataChecksum dcs;
+    try (FileInputStream fis = fileIoProvider.getFileInputStream(
+        this, metaFile)) {
+      dcs = BlockMetadataHeader.readHeader(fis).getChecksum();
+    }
+    final int checksumSize = dcs.getChecksumSize();
+    final long onDiskLen = blockFile.length();
+    final int bytesPerChecksum = dcs.getBytesPerChecksum();
+
+    if (onDiskLen % bytesPerChecksum == 0) {
+      // the last chunk is a complete one. No need to preserve its checksum
+      // because it will not be modified.
+      return null;
+    }
+
+    long offsetInChecksum = BlockMetadataHeader.getHeaderSize() +
+        (onDiskLen / bytesPerChecksum) * checksumSize;
+    byte[] lastChecksum = new byte[checksumSize];
+    try (RandomAccessFile raf = fileIoProvider.getRandomAccessFile(
+        this, metaFile, "r")) {
+      raf.seek(offsetInChecksum);
+      int readBytes = raf.read(lastChecksum, 0, checksumSize);
+      if (readBytes == -1) {
+        throw new IOException("Expected to read " + checksumSize +
+            " bytes from offset " + offsetInChecksum +
+            " but reached end of file.");
+      } else if (readBytes != checksumSize) {
+        throw new IOException("Expected to read " + checksumSize +
+            " bytes from offset " + offsetInChecksum + " but read " +
+            readBytes + " bytes.");
+      }
+    }
+    return lastChecksum;
+  }
+
+  public ReplicaInPipeline append(String bpid, ReplicaInfo replicaInfo,
+      long newGS, long estimateBlockLen) throws IOException {
+
+    long bytesReserved = estimateBlockLen - replicaInfo.getNumBytes();
+    if (getAvailable() < bytesReserved) {
+      throw new DiskOutOfSpaceException("Insufficient space for appending to "
+          + replicaInfo);
+    }
+
+    assert replicaInfo.getVolume() == this:
+      "The volume of the replica should be the same as this volume";
+
+    // construct a RBW replica with the new GS
+    File newBlkFile = new File(getRbwDir(bpid), replicaInfo.getBlockName());
+    LocalReplicaInPipeline newReplicaInfo = new ReplicaBuilder(ReplicaState.RBW)
+        .setBlockId(replicaInfo.getBlockId())
+        .setLength(replicaInfo.getNumBytes())
+        .setGenerationStamp(newGS)
+        .setFsVolume(this)
+        .setDirectoryToUse(newBlkFile.getParentFile())
+        .setWriterThread(Thread.currentThread())
+        .setBytesToReserve(bytesReserved)
+        .buildLocalReplicaInPipeline();
+
+    // Only a finalized replica can be appended.
+    FinalizedReplica finalized = (FinalizedReplica)replicaInfo;
+    // load last checksum and datalen
+    newReplicaInfo.setLastChecksumAndDataLen(
+        finalized.getVisibleLength(), finalized.getLastPartialChunkChecksum());
+
+    // rename meta file to rbw directory
+    // rename block file to rbw directory
+    newReplicaInfo.moveReplicaFrom(replicaInfo, newBlkFile);
+
+    reserveSpaceForReplica(bytesReserved);
+    return newReplicaInfo;
+  }
+
+  public ReplicaInPipeline createRbw(ExtendedBlock b) throws IOException {
+
+    File f = createRbwFile(b.getBlockPoolId(), b.getLocalBlock());
+    LocalReplicaInPipeline newReplicaInfo = new ReplicaBuilder(ReplicaState.RBW)
+        .setBlockId(b.getBlockId())
+        .setGenerationStamp(b.getGenerationStamp())
+        .setFsVolume(this)
+        .setDirectoryToUse(f.getParentFile())
+        .setBytesToReserve(b.getNumBytes())
+        .buildLocalReplicaInPipeline();
+    return newReplicaInfo;
+  }
+
+  public ReplicaInPipeline convertTemporaryToRbw(ExtendedBlock b,
+      ReplicaInfo temp) throws IOException {
+
+    final long blockId = b.getBlockId();
+    final long expectedGs = b.getGenerationStamp();
+    final long visible = b.getNumBytes();
+    final long numBytes = temp.getNumBytes();
+
+    // move block files to the rbw directory
+    BlockPoolSlice bpslice = getBlockPoolSlice(b.getBlockPoolId());
+    final File dest = FsDatasetImpl.moveBlockFiles(b.getLocalBlock(), temp,
+        bpslice.getRbwDir());
+    // create RBW
+    final LocalReplicaInPipeline rbw = new ReplicaBuilder(ReplicaState.RBW)
+        .setBlockId(blockId)
+        .setLength(numBytes)
+        .setGenerationStamp(expectedGs)
+        .setFsVolume(this)
+        .setDirectoryToUse(dest.getParentFile())
+        .setWriterThread(Thread.currentThread())
+        .setBytesToReserve(0)
+        .buildLocalReplicaInPipeline();
+    rbw.setBytesAcked(visible);
+
+    // load last checksum and datalen
+    final File destMeta = FsDatasetUtil.getMetaFile(dest,
+        b.getGenerationStamp());
+    byte[] lastChunkChecksum = loadLastPartialChunkChecksum(dest, destMeta);
+    rbw.setLastChecksumAndDataLen(numBytes, lastChunkChecksum);
+    return rbw;
+  }
+
+  public ReplicaInPipeline createTemporary(ExtendedBlock b) throws IOException {
+    // create a temporary file to hold block in the designated volume
+    File f = createTmpFile(b.getBlockPoolId(), b.getLocalBlock());
+    LocalReplicaInPipeline newReplicaInfo =
+        new ReplicaBuilder(ReplicaState.TEMPORARY)
+          .setBlockId(b.getBlockId())
+          .setGenerationStamp(b.getGenerationStamp())
+          .setDirectoryToUse(f.getParentFile())
+          .setBytesToReserve(b.getLocalBlock().getNumBytes())
+          .setFsVolume(this)
+          .buildLocalReplicaInPipeline();
+    return newReplicaInfo;
+  }
+
+  public ReplicaInPipeline updateRURCopyOnTruncate(ReplicaInfo rur,
+      String bpid, long newBlockId, long recoveryId, long newlength)
+      throws IOException {
+
+    rur.breakHardLinksIfNeeded();
+    File[] copiedReplicaFiles =
+        copyReplicaWithNewBlockIdAndGS(rur, bpid, newBlockId, recoveryId);
+    File blockFile = copiedReplicaFiles[1];
+    File metaFile = copiedReplicaFiles[0];
+    LocalReplica.truncateBlock(rur.getVolume(), blockFile, metaFile,
+        rur.getNumBytes(), newlength, fileIoProvider);
+
+    LocalReplicaInPipeline newReplicaInfo = new ReplicaBuilder(ReplicaState.RBW)
+        .setBlockId(newBlockId)
+        .setGenerationStamp(recoveryId)
+        .setFsVolume(this)
+        .setDirectoryToUse(blockFile.getParentFile())
+        .setBytesToReserve(newlength)
+        .buildLocalReplicaInPipeline();
+    // In theory, this rbw replica needs to reload last chunk checksum,
+    // but it is immediately converted to finalized state within the same lock,
+    // so no need to update it.
+    return newReplicaInfo;
+  }
+
+  private File[] copyReplicaWithNewBlockIdAndGS(
+      ReplicaInfo replicaInfo, String bpid, long newBlkId, long newGS)
+      throws IOException {
+    String blockFileName = Block.BLOCK_FILE_PREFIX + newBlkId;
+    FsVolumeImpl v = (FsVolumeImpl) replicaInfo.getVolume();
+    final File tmpDir = v.getBlockPoolSlice(bpid).getTmpDir();
+    final File destDir = DatanodeUtil.idToBlockDir(tmpDir, newBlkId);
+    final File dstBlockFile = new File(destDir, blockFileName);
+    final File dstMetaFile = FsDatasetUtil.getMetaFile(dstBlockFile, newGS);
+    return FsDatasetImpl.copyBlockFiles(replicaInfo, dstMetaFile,
+        dstBlockFile, true, DFSUtilClient.getSmallBufferSize(conf), conf);
+  }
+
+  @Override
+  public LinkedList<ScanInfo> compileReport(String bpid,
+      LinkedList<ScanInfo> report, ReportCompiler reportCompiler)
+      throws InterruptedException, IOException {
+    return compileReport(getFinalizedDir(bpid),
+        getFinalizedDir(bpid), report, reportCompiler);
+  }
+
+  @Override
+  public FileIoProvider getFileIoProvider() {
+    return fileIoProvider;
+  }
+
+  @Override
+  public DataNodeVolumeMetrics getMetrics() {
+    return metrics;
+  }
+
+  private LinkedList<ScanInfo> compileReport(File bpFinalizedDir,
+      File dir, LinkedList<ScanInfo> report, ReportCompiler reportCompiler)
+        throws InterruptedException {
+
+    reportCompiler.throttle();
+
+    List <String> fileNames;
+    try {
+      fileNames = fileIoProvider.listDirectory(
+          this, dir, BlockDirFilter.INSTANCE);
+    } catch (IOException ioe) {
+      LOG.warn("Exception occurred while compiling report: ", ioe);
+      // Volume error check moved to FileIoProvider.
+      // Ignore this directory and proceed.
+      return report;
+    }
+    Collections.sort(fileNames);
+
+    /*
+     * Assumption: In the sorted list of files block file appears immediately
+     * before block metadata file. This is true for the current naming
+     * convention for block file blk_<blockid> and meta file
+     * blk_<blockid>_<genstamp>.meta
+     */
+    for (int i = 0; i < fileNames.size(); i++) {
+      // Make sure this thread can make a timely exit. With a low throttle
+      // rate, completing a run can take a looooong time.
+      if (Thread.interrupted()) {
+        throw new InterruptedException();
+      }
+
+      File file = new File(dir, fileNames.get(i));
+      if (file.isDirectory()) {
+        compileReport(bpFinalizedDir, file, report, reportCompiler);
+        continue;
+      }
+      if (!Block.isBlockFilename(file)) {
+        if (isBlockMetaFile(Block.BLOCK_FILE_PREFIX, file.getName())) {
+          long blockId = Block.getBlockId(file.getName());
+          verifyFileLocation(file.getParentFile(), bpFinalizedDir,
+              blockId);
+          report.add(new ScanInfo(blockId, null, file, this));
+        }
+        continue;
+      }
+      File blockFile = file;
+      long blockId = Block.filename2id(file.getName());
+      File metaFile = null;
+
+      // Skip all the files that start with block name until
+      // getting to the metafile for the block
+      while (i + 1 < fileNames.size()) {
+        File blkMetaFile = new File(dir, fileNames.get(i + 1));
+        if (!(blkMetaFile.isFile()
+            && blkMetaFile.getName().startsWith(blockFile.getName()))) {
+          break;
+        }
+        i++;
+        if (isBlockMetaFile(blockFile.getName(), blkMetaFile.getName())) {
+          metaFile = blkMetaFile;
+          break;
+        }
+      }
+      verifyFileLocation(blockFile, bpFinalizedDir, blockId);
+      report.add(new ScanInfo(blockId, blockFile, metaFile, this));
+    }
+    return report;
+  }
+
+  /**
+   * Helper method to determine if a file name is consistent with a block.
+   * meta-data file
+   *
+   * @param blockId the block ID
+   * @param metaFile the file to check
+   * @return whether the file name is a block meta-data file name
+   */
+  private static boolean isBlockMetaFile(String blockId, String metaFile) {
+    return metaFile.startsWith(blockId)
+        && metaFile.endsWith(Block.METADATA_EXTENSION);
+  }
+
+  /**
+   * Verify whether the actual directory location of block file has the
+   * expected directory path computed using its block ID.
+   */
+  private void verifyFileLocation(File actualBlockFile,
+      File bpFinalizedDir, long blockId) {
+    File expectedBlockDir =
+        DatanodeUtil.idToBlockDir(bpFinalizedDir, blockId);
+    File actualBlockDir = actualBlockFile.getParentFile();
+    if (actualBlockDir.compareTo(expectedBlockDir) != 0) {
+      LOG.warn("Block: " + blockId +
+          " found in invalid directory.  Expected directory: " +
+          expectedBlockDir + ".  Actual directory: " + actualBlockDir);
+    }
+  }
+
+  public ReplicaInfo moveBlockToTmpLocation(ExtendedBlock block,
+      ReplicaInfo replicaInfo,
+      int smallBufferSize,
+      Configuration conf) throws IOException {
+
+    File[] blockFiles = FsDatasetImpl.copyBlockFiles(block.getBlockId(),
+        block.getGenerationStamp(), replicaInfo,
+        getTmpDir(block.getBlockPoolId()),
+        replicaInfo.isOnTransientStorage(), smallBufferSize, conf);
+
+    ReplicaInfo newReplicaInfo = new ReplicaBuilder(ReplicaState.TEMPORARY)
+        .setBlockId(replicaInfo.getBlockId())
+        .setGenerationStamp(replicaInfo.getGenerationStamp())
+        .setFsVolume(this)
+        .setDirectoryToUse(blockFiles[0].getParentFile())
+        .setBytesToReserve(0)
+        .build();
+    newReplicaInfo.setNumBytes(blockFiles[1].length());
+    return newReplicaInfo;
+  }
+
+  public File[] copyBlockToLazyPersistLocation(String bpId, long blockId,
+      long genStamp,
+      ReplicaInfo replicaInfo,
+      int smallBufferSize,
+      Configuration conf) throws IOException {
+
+    File lazyPersistDir  = getLazyPersistDir(bpId);
+    if (!lazyPersistDir.exists() && !lazyPersistDir.mkdirs()) {
+      FsDatasetImpl.LOG.warn("LazyWriter failed to create " + lazyPersistDir);
+      throw new IOException("LazyWriter fail to find or " +
+          "create lazy persist dir: " + lazyPersistDir.toString());
+    }
+
+    // No FsDatasetImpl lock for the file copy
+    File[] targetFiles = FsDatasetImpl.copyBlockFiles(
+        blockId, genStamp, replicaInfo, lazyPersistDir, true,
+        smallBufferSize, conf);
+    return targetFiles;
+  }
+
+  public void incrNumBlocks(String bpid) throws IOException {
+    getBlockPoolSlice(bpid).incrNumBlocks();
+  }
+
+  public void resolveDuplicateReplicas(String bpid, ReplicaInfo memBlockInfo,
+      ReplicaInfo diskBlockInfo, ReplicaMap volumeMap) throws IOException {
+    getBlockPoolSlice(bpid).resolveDuplicateReplicas(
+        memBlockInfo, diskBlockInfo, volumeMap);
+  }
+
+  public ReplicaInfo activateSavedReplica(String bpid,
+      ReplicaInfo replicaInfo, RamDiskReplica replicaState) throws IOException {
+    return getBlockPoolSlice(bpid).activateSavedReplica(replicaInfo,
+        replicaState);
+  }
+}

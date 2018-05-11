@@ -18,21 +18,39 @@
 
 package org.apache.hadoop.fs;
 
-import java.io.*;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
+import java.nio.charset.Charset;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.jar.Attributes;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
+import java.util.zip.ZipInputStream;
 
 import org.apache.commons.collections.map.CaseInsensitiveMap;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -44,11 +62,11 @@ import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.nativeio.NativeIO;
-import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.Shell.ShellCommandExecutor;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A collection of file-processing util methods
@@ -57,7 +75,7 @@ import org.apache.commons.logging.LogFactory;
 @InterfaceStability.Evolving
 public class FileUtil {
 
-  private static final Log LOG = LogFactory.getLog(FileUtil.class);
+  private static final Logger LOG = LoggerFactory.getLogger(FileUtil.class);
 
   /* The error code is defined in winutils to indicate insufficient
    * privilege to create symbolic links. This value need to keep in
@@ -65,6 +83,11 @@ public class FileUtil {
    * "src\winutils\common.h"
    * */
   public static final int SYMLINK_NO_PRIVILEGE = 2;
+
+  /**
+   * Buffer size for copy the content of compressed file to new file.
+   */
+  private static final int BUFFER_SIZE = 8_192;
 
   /**
    * convert an array of FileStatus to an array of Path
@@ -97,6 +120,22 @@ public class FileUtil {
       return new Path[]{path};
     else
       return stat2Paths(stats);
+  }
+
+  /**
+   * Register all files recursively to be deleted on exit.
+   * @param file File/directory to be deleted
+   */
+  public static void fullyDeleteOnExit(final File file) {
+    file.deleteOnExit();
+    if (file.isDirectory()) {
+      File[] files = file.listFiles();
+      if (files != null) {
+        for (File child : files) {
+          fullyDeleteOnExit(child);
+        }
+      }
+    }
   }
 
   /**
@@ -271,8 +310,8 @@ public class FileUtil {
                                         Path dst)
                                         throws IOException {
     if (srcFS == dstFS) {
-      String srcq = src.makeQualified(srcFS).toString() + Path.SEPARATOR;
-      String dstq = dst.makeQualified(dstFS).toString() + Path.SEPARATOR;
+      String srcq = srcFS.makeQualified(src).toString() + Path.SEPARATOR;
+      String dstq = dstFS.makeQualified(dst).toString() + Path.SEPARATOR;
       if (dstq.startsWith(srcq)) {
         if (srcq.length() == dstq.length()) {
           throw new IOException("Cannot copy " + src + " to itself.");
@@ -305,14 +344,15 @@ public class FileUtil {
       return copy(srcFS, srcs[0], dstFS, dst, deleteSource, overwrite, conf);
 
     // Check if dest is directory
-    if (!dstFS.exists(dst)) {
-      throw new IOException("`" + dst +"': specified destination directory " +
-                            "does not exist");
-    } else {
+    try {
       FileStatus sdst = dstFS.getFileStatus(dst);
       if (!sdst.isDirectory())
         throw new IOException("copying multiple files, but last argument `" +
                               dst + "' is not a directory");
+    } catch (FileNotFoundException e) {
+      throw new IOException(
+          "`" + dst + "': specified destination directory " +
+              "does not exist", e);
     }
 
     for (Path src : srcs) {
@@ -379,46 +419,6 @@ public class FileUtil {
       return true;
     }
 
-  }
-
-  /** Copy all files in a directory to one output file (merge). */
-  public static boolean copyMerge(FileSystem srcFS, Path srcDir,
-                                  FileSystem dstFS, Path dstFile,
-                                  boolean deleteSource,
-                                  Configuration conf, String addString) throws IOException {
-    dstFile = checkDest(srcDir.getName(), dstFS, dstFile, false);
-
-    if (!srcFS.getFileStatus(srcDir).isDirectory())
-      return false;
-
-    OutputStream out = dstFS.create(dstFile);
-
-    try {
-      FileStatus contents[] = srcFS.listStatus(srcDir);
-      Arrays.sort(contents);
-      for (int i = 0; i < contents.length; i++) {
-        if (contents[i].isFile()) {
-          InputStream in = srcFS.open(contents[i].getPath());
-          try {
-            IOUtils.copyBytes(in, out, conf, false);
-            if (addString!=null)
-              out.write(addString.getBytes("UTF-8"));
-
-          } finally {
-            in.close();
-          }
-        }
-      }
-    } finally {
-      out.close();
-    }
-
-
-    if (deleteSource) {
-      return srcFS.delete(srcDir, true);
-    } else {
-      return true;
-    }
   }
 
   /** Copy local files to a FileSystem. */
@@ -500,15 +500,21 @@ public class FileUtil {
 
   private static Path checkDest(String srcName, FileSystem dstFS, Path dst,
       boolean overwrite) throws IOException {
-    if (dstFS.exists(dst)) {
-      FileStatus sdst = dstFS.getFileStatus(dst);
+    FileStatus sdst;
+    try {
+      sdst = dstFS.getFileStatus(dst);
+    } catch (FileNotFoundException e) {
+      sdst = null;
+    }
+    if (null != sdst) {
       if (sdst.isDirectory()) {
         if (null == srcName) {
-          throw new IOException("Target " + dst + " is a directory");
+          throw new PathIsDirectoryException(dst.toString());
         }
         return checkDest(null, dstFS, new Path(dst, srcName), overwrite);
       } else if (!overwrite) {
-        throw new IOException("Target " + dst + " already exists");
+        throw new PathExistsException(dst.toString(),
+            "Target " + dst + " already exists");
       }
     }
     return dst;
@@ -532,6 +538,22 @@ public class FileUtil {
    */
   public static String makeShellPath(File file) throws IOException {
     return makeShellPath(file, false);
+  }
+
+  /**
+   * Convert a os-native filename to a path that works for the shell
+   * and avoids script injection attacks.
+   * @param file The filename to convert
+   * @return The unix pathname
+   * @throws IOException on windows, there can be problems with the subprocess
+   */
+  public static String makeSecureShellPath(File file) throws IOException {
+    if (Shell.WINDOWS) {
+      // Currently it is never called, but it might be helpful in the future.
+      throw new UnsupportedOperationException("Not implemented for Windows");
+    } else {
+      return makeShellPath(file, false).replace("'", "'\\''");
+    }
   }
 
   /**
@@ -585,11 +607,48 @@ public class FileUtil {
   }
 
   /**
-   * Given a File input it will unzip the file in a the unzip directory
+   * Given a stream input it will unzip the it in the unzip directory.
+   * passed as the second parameter
+   * @param inputStream The zip file as input
+   * @param toDir The unzip directory where to unzip the zip file.
+   * @throws IOException an exception occurred
+   */
+  public static void unZip(InputStream inputStream, File toDir)
+      throws IOException {
+    try (ZipInputStream zip = new ZipInputStream(inputStream)) {
+      int numOfFailedLastModifiedSet = 0;
+      for(ZipEntry entry = zip.getNextEntry();
+          entry != null;
+          entry = zip.getNextEntry()) {
+        if (!entry.isDirectory()) {
+          File file = new File(toDir, entry.getName());
+          File parent = file.getParentFile();
+          if (!parent.mkdirs() &&
+              !parent.isDirectory()) {
+            throw new IOException("Mkdirs failed to create " +
+                parent.getAbsolutePath());
+          }
+          try (OutputStream out = new FileOutputStream(file)) {
+            IOUtils.copyBytes(zip, out, BUFFER_SIZE);
+          }
+          if (!file.setLastModified(entry.getTime())) {
+            numOfFailedLastModifiedSet++;
+          }
+        }
+      }
+      if (numOfFailedLastModifiedSet > 0) {
+        LOG.warn("Could not set last modfied time for {} file(s)",
+            numOfFailedLastModifiedSet);
+      }
+    }
+  }
+
+  /**
+   * Given a File input it will unzip it in the unzip directory.
    * passed as the second parameter
    * @param inFile The zip file as input
    * @param unzipDir The unzip directory where to unzip the zip file.
-   * @throws IOException
+   * @throws IOException An I/O exception has occurred
    */
   public static void unZip(File inFile, File unzipDir) throws IOException {
     Enumeration<? extends ZipEntry> entries;
@@ -630,6 +689,138 @@ public class FileUtil {
   }
 
   /**
+   * Run a command and send the contents of an input stream to it.
+   * @param inputStream Input stream to forward to the shell command
+   * @param command shell command to run
+   * @throws IOException read or write failed
+   * @throws InterruptedException command interrupted
+   * @throws ExecutionException task submit failed
+   */
+  private static void runCommandOnStream(
+      InputStream inputStream, String command)
+      throws IOException, InterruptedException, ExecutionException {
+    ExecutorService executor = null;
+    ProcessBuilder builder = new ProcessBuilder();
+    builder.command(
+        Shell.WINDOWS ? "cmd" : "bash",
+        Shell.WINDOWS ? "/c" : "-c",
+        command);
+    Process process = builder.start();
+    int exitCode;
+    try {
+      // Consume stdout and stderr, to avoid blocking the command
+      executor = Executors.newFixedThreadPool(2);
+      Future output = executor.submit(() -> {
+        try {
+          // Read until the output stream receives an EOF and closed.
+          if (LOG.isDebugEnabled()) {
+            // Log directly to avoid out of memory errors
+            try (BufferedReader reader =
+                     new BufferedReader(
+                         new InputStreamReader(process.getInputStream(),
+                             Charset.forName("UTF-8")))) {
+              String line;
+              while((line = reader.readLine()) != null) {
+                LOG.debug(line);
+              }
+            }
+          } else {
+            org.apache.commons.io.IOUtils.copy(
+                process.getInputStream(),
+                new IOUtils.NullOutputStream());
+          }
+        } catch (IOException e) {
+          LOG.debug(e.getMessage());
+        }
+      });
+      Future error = executor.submit(() -> {
+        try {
+          // Read until the error stream receives an EOF and closed.
+          if (LOG.isDebugEnabled()) {
+            // Log directly to avoid out of memory errors
+            try (BufferedReader reader =
+                     new BufferedReader(
+                         new InputStreamReader(process.getErrorStream(),
+                             Charset.forName("UTF-8")))) {
+              String line;
+              while((line = reader.readLine()) != null) {
+                LOG.debug(line);
+              }
+            }
+          } else {
+            org.apache.commons.io.IOUtils.copy(
+                process.getErrorStream(),
+                new IOUtils.NullOutputStream());
+          }
+        } catch (IOException e) {
+          LOG.debug(e.getMessage());
+        }
+      });
+
+      // Pass the input stream to the command to process
+      try {
+        org.apache.commons.io.IOUtils.copy(
+            inputStream, process.getOutputStream());
+      } finally {
+        process.getOutputStream().close();
+      }
+
+      // Wait for both stdout and stderr futures to finish
+      error.get();
+      output.get();
+    } finally {
+      // Clean up the threads
+      if (executor != null) {
+        executor.shutdown();
+      }
+      // Wait to avoid leaking the child process
+      exitCode = process.waitFor();
+    }
+
+    if (exitCode != 0) {
+      throw new IOException(
+          String.format(
+              "Error executing command. %s " +
+                  "Process exited with exit code %d.",
+              command, exitCode));
+    }
+  }
+
+  /**
+   * Given a Tar File as input it will untar the file in a the untar directory
+   * passed as the second parameter
+   *
+   * This utility will untar ".tar" files and ".tar.gz","tgz" files.
+   *
+   * @param inputStream The tar file as input.
+   * @param untarDir The untar directory where to untar the tar file.
+   * @param gzipped The input stream is gzipped
+   *                TODO Use magic number and PusbackInputStream to identify
+   * @throws IOException an exception occurred
+   * @throws InterruptedException command interrupted
+   * @throws ExecutionException task submit failed
+   */
+  public static void unTar(InputStream inputStream, File untarDir,
+                           boolean gzipped)
+      throws IOException, InterruptedException, ExecutionException {
+    if (!untarDir.mkdirs()) {
+      if (!untarDir.isDirectory()) {
+        throw new IOException("Mkdirs failed to create " + untarDir);
+      }
+    }
+
+    if(Shell.WINDOWS) {
+      // Tar is not native to Windows. Use simple Java based implementation for
+      // tests and simple tar archives
+      unTarUsingJava(inputStream, untarDir, gzipped);
+    } else {
+      // spawn tar utility to untar archive for full fledged unix behavior such
+      // as resolving symlinks in tar archives
+      unTarUsingTar(inputStream, untarDir, gzipped);
+    }
+  }
+
+  /**
    * Given a Tar File as input it will untar the file in a the untar directory
    * passed as the second parameter
    *
@@ -659,23 +850,41 @@ public class FileUtil {
     }
   }
 
+  private static void unTarUsingTar(InputStream inputStream, File untarDir,
+                                    boolean gzipped)
+      throws IOException, InterruptedException, ExecutionException {
+    StringBuilder untarCommand = new StringBuilder();
+    if (gzipped) {
+      untarCommand.append("gzip -dc | (");
+    }
+    untarCommand.append("cd '");
+    untarCommand.append(FileUtil.makeSecureShellPath(untarDir));
+    untarCommand.append("' && ");
+    untarCommand.append("tar -x ");
+
+    if (gzipped) {
+      untarCommand.append(")");
+    }
+    runCommandOnStream(inputStream, untarCommand.toString());
+  }
+
   private static void unTarUsingTar(File inFile, File untarDir,
       boolean gzipped) throws IOException {
     StringBuffer untarCommand = new StringBuffer();
     if (gzipped) {
       untarCommand.append(" gzip -dc '");
-      untarCommand.append(FileUtil.makeShellPath(inFile));
+      untarCommand.append(FileUtil.makeSecureShellPath(inFile));
       untarCommand.append("' | (");
     }
     untarCommand.append("cd '");
-    untarCommand.append(FileUtil.makeShellPath(untarDir));
-    untarCommand.append("' ; ");
+    untarCommand.append(FileUtil.makeSecureShellPath(untarDir));
+    untarCommand.append("' && ");
     untarCommand.append("tar -xf ");
 
     if (gzipped) {
       untarCommand.append(" -)");
     } else {
-      untarCommand.append(FileUtil.makeShellPath(inFile));
+      untarCommand.append(FileUtil.makeSecureShellPath(inFile));
     }
     String[] shellCmd = { "bash", "-c", untarCommand.toString() };
     ShellCommandExecutor shexec = new ShellCommandExecutor(shellCmd);
@@ -687,7 +896,7 @@ public class FileUtil {
     }
   }
 
-  private static void unTarUsingJava(File inFile, File untarDir,
+  static void unTarUsingJava(File inFile, File untarDir,
       boolean gzipped) throws IOException {
     InputStream inputStream = null;
     TarArchiveInputStream tis = null;
@@ -706,7 +915,30 @@ public class FileUtil {
         entry = tis.getNextTarEntry();
       }
     } finally {
-      IOUtils.cleanup(LOG, tis, inputStream);
+      IOUtils.cleanupWithLogger(LOG, tis, inputStream);
+    }
+  }
+
+  private static void unTarUsingJava(InputStream inputStream, File untarDir,
+                                     boolean gzipped) throws IOException {
+    TarArchiveInputStream tis = null;
+    try {
+      if (gzipped) {
+        inputStream = new BufferedInputStream(new GZIPInputStream(
+            inputStream));
+      } else {
+        inputStream =
+            new BufferedInputStream(inputStream);
+      }
+
+      tis = new TarArchiveInputStream(inputStream);
+
+      for (TarArchiveEntry entry = tis.getNextTarEntry(); entry != null;) {
+        unpackEntries(tis, entry, untarDir);
+        entry = tis.getNextTarEntry();
+      }
+    } finally {
+      IOUtils.cleanupWithLogger(LOG, tis, inputStream);
     }
   }
 
@@ -723,6 +955,14 @@ public class FileUtil {
         unpackEntries(tis, e, subDir);
       }
 
+      return;
+    }
+
+    if (entry.isSymbolicLink()) {
+      // Create symbolic link relative to tar parent dir
+      Files.createSymbolicLink(FileSystems.getDefault()
+              .getPath(outputDir.getPath(), entry.getName()),
+          FileSystems.getDefault().getPath(entry.getLinkName()));
       return;
     }
 
@@ -783,35 +1023,6 @@ public class FileUtil {
         Path.getPathWithoutSchemeAndAuthority(new Path(target)).toString());
     File linkFile = new File(
         Path.getPathWithoutSchemeAndAuthority(new Path(linkname)).toString());
-
-    // If not on Java7+, copy a file instead of creating a symlink since
-    // Java6 has close to no support for symlinks on Windows. Specifically
-    // File#length and File#renameTo do not work as expected.
-    // (see HADOOP-9061 for additional details)
-    // We still create symlinks for directories, since the scenario in this
-    // case is different. The directory content could change in which
-    // case the symlink loses its purpose (for example task attempt log folder
-    // is symlinked under userlogs and userlogs are generated afterwards).
-    if (Shell.WINDOWS && !Shell.isJava7OrAbove() && targetFile.isFile()) {
-      try {
-        LOG.warn("FileUtil#symlink: On Windows+Java6, copying file instead " +
-            "of creating a symlink. Copying " + target + " -> " + linkname);
-
-        if (!linkFile.getParentFile().exists()) {
-          LOG.warn("Parent directory " + linkFile.getParent() +
-              " does not exist.");
-          return 1;
-        } else {
-          org.apache.commons.io.FileUtils.copyFile(targetFile, linkFile);
-        }
-      } catch (IOException ex) {
-        LOG.warn("FileUtil#symlink failed to copy the file with error: "
-            + ex.getMessage());
-        // Exit with non-zero exit code
-        return 1;
-      }
-      return 0;
-    }
 
     String[] cmd = Shell.getSymlinkCommand(
         targetFile.toString(),
@@ -1188,9 +1399,14 @@ public class FileUtil {
    * an IOException to be thrown.
    * @param dir directory for which listing should be performed
    * @return list of file names or empty string list
-   * @exception IOException for invalid directory or for a bad disk.
+   * @exception AccessDeniedException for unreadable directory
+   * @exception IOException for invalid directory or for bad disk
    */
   public static String[] list(File dir) throws IOException {
+    if (!canRead(dir)) {
+      throw new AccessDeniedException(dir.toString(), null,
+          FSExceptionMessages.PERMISSION_DENIED);
+    }
     String[] fileNames = dir.list();
     if(fileNames == null) {
       throw new IOException("Invalid directory or I/O error occurred for dir: "
@@ -1265,19 +1481,13 @@ public class FileUtil {
         continue;
       }
       if (classPathEntry.endsWith("*")) {
-        boolean foundWildCardJar = false;
         // Append all jars that match the wildcard
-        Path globPath = new Path(classPathEntry).suffix("{.jar,.JAR}");
-        FileStatus[] wildcardJars = FileContext.getLocalFSFileContext().util()
-          .globStatus(globPath);
-        if (wildcardJars != null) {
-          for (FileStatus wildcardJar: wildcardJars) {
-            foundWildCardJar = true;
-            classPathEntryList.add(wildcardJar.getPath().toUri().toURL()
-              .toExternalForm());
+        List<Path> jars = getJarsInDirectory(classPathEntry);
+        if (!jars.isEmpty()) {
+          for (Path jar: jars) {
+            classPathEntryList.add(jar.toUri().toURL().toExternalForm());
           }
-        }
-        if (!foundWildCardJar) {
+        } else {
           unexpandedWildcardClasspath.append(File.pathSeparator);
           unexpandedWildcardClasspath.append(classPathEntry);
         }
@@ -1318,19 +1528,56 @@ public class FileUtil {
 
     // Write the manifest to output JAR file
     File classPathJar = File.createTempFile("classpath-", ".jar", workingDir);
-    FileOutputStream fos = null;
-    BufferedOutputStream bos = null;
-    JarOutputStream jos = null;
-    try {
-      fos = new FileOutputStream(classPathJar);
-      bos = new BufferedOutputStream(fos);
-      jos = new JarOutputStream(bos, jarManifest);
-    } finally {
-      IOUtils.cleanup(LOG, jos, bos, fos);
+    try (FileOutputStream fos = new FileOutputStream(classPathJar);
+         BufferedOutputStream bos = new BufferedOutputStream(fos)) {
+      JarOutputStream jos = new JarOutputStream(bos, jarManifest);
+      jos.close();
     }
     String[] jarCp = {classPathJar.getCanonicalPath(),
                         unexpandedWildcardClasspath.toString()};
     return jarCp;
+  }
+
+  /**
+   * Returns all jars that are in the directory. It is useful in expanding a
+   * wildcard path to return all jars from the directory to use in a classpath.
+   * It operates only on local paths.
+   *
+   * @param path the path to the directory. The path may include the wildcard.
+   * @return the list of jars as URLs, or an empty list if there are no jars, or
+   * the directory does not exist locally
+   */
+  public static List<Path> getJarsInDirectory(String path) {
+    return getJarsInDirectory(path, true);
+  }
+
+  /**
+   * Returns all jars that are in the directory. It is useful in expanding a
+   * wildcard path to return all jars from the directory to use in a classpath.
+   *
+   * @param path the path to the directory. The path may include the wildcard.
+   * @return the list of jars as URLs, or an empty list if there are no jars, or
+   * the directory does not exist
+   */
+  public static List<Path> getJarsInDirectory(String path, boolean useLocal) {
+    List<Path> paths = new ArrayList<>();
+    try {
+      // add the wildcard if it is not provided
+      if (!path.endsWith("*")) {
+        path += File.separator + "*";
+      }
+      Path globPath = new Path(path).suffix("{.jar,.JAR}");
+      FileContext context = useLocal ?
+          FileContext.getLocalFSFileContext() :
+          FileContext.getFileContext(globPath.toUri());
+      FileStatus[] files = context.util().globStatus(globPath);
+      if (files != null) {
+        for (FileStatus file: files) {
+          paths.add(file.getPath());
+        }
+      }
+    } catch (IOException ignore) {} // return the empty list
+    return paths;
   }
 
   public static boolean compareFs(FileSystem srcFs, FileSystem destFs) {

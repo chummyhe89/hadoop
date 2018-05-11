@@ -26,14 +26,13 @@ import java.net.InetSocketAddress;
 import java.security.PrivilegedExceptionAction;
 import java.util.concurrent.ScheduledExecutorService;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FSError;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocalDirAllocator;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.ipc.CallerContext;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.mapreduce.MRConfig;
 import org.apache.hadoop.mapreduce.MRJobConfig;
@@ -57,14 +56,17 @@ import org.apache.hadoop.yarn.YarnUncaughtExceptionHandler;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.ApplicationConstants.Environment;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
+import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.util.ConverterUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The main() for MapReduce task processes.
  */
 class YarnChild {
 
-  private static final Log LOG = LogFactory.getLog(YarnChild.class);
+  private static final Logger LOG = LoggerFactory.getLogger(YarnChild.class);
 
   static volatile TaskAttemptID taskid = null;
 
@@ -76,6 +78,8 @@ class YarnChild {
     // Initing with our JobConf allows us to avoid loading confs twice
     Limits.init(job);
     UserGroupInformation.setConfiguration(job);
+    // MAPREDUCE-6565: need to set configuration for SecurityUtil.
+    SecurityUtil.setConfiguration(job);
 
     String host = args[0];
     int port = Integer.parseInt(args[1]);
@@ -85,6 +89,9 @@ class YarnChild {
     long jvmIdLong = Long.parseLong(args[3]);
     JVMId jvmId = new JVMId(firstTaskid.getJobID(),
         firstTaskid.getTaskType() == TaskType.MAP, jvmIdLong);
+    
+    CallerContext.setCurrent(
+        new CallerContext.Builder("mr_" + firstTaskid.toString()).build());
 
     // initialize metrics
     DefaultMetricsSystem.initialize(
@@ -93,10 +100,7 @@ class YarnChild {
     // Security framework already loaded the tokens into current ugi
     Credentials credentials =
         UserGroupInformation.getCurrentUser().getCredentials();
-    LOG.info("Executing with tokens:");
-    for (Token<?> token: credentials.getAllTokens()) {
-      LOG.info(token);
-    }
+    LOG.info("Executing with tokens: {}", credentials.getAllTokens());
 
     // Create TaskUmbilicalProtocol as actual task owner.
     UserGroupInformation taskOwner =
@@ -122,7 +126,7 @@ class YarnChild {
 
     try {
       int idleLoopCount = 0;
-      JvmTask myTask = null;;
+      JvmTask myTask = null;
       // poll for new task
       for (int idle = 0; null == myTask; ++idle) {
         long sleepTimeMilliSecs = Math.min(idle * 500, 1500);
@@ -172,7 +176,7 @@ class YarnChild {
         }
       });
     } catch (FSError e) {
-      LOG.fatal("FSError from child", e);
+      LOG.error("FSError from child", e);
       if (!ShutdownHookManager.get().isShutdownInProgress()) {
         umbilical.fsError(taskid, e.getMessage());
       }
@@ -202,11 +206,11 @@ class YarnChild {
       if (taskid != null) {
         if (!ShutdownHookManager.get().isShutdownInProgress()) {
           umbilical.fatalError(taskid,
-              StringUtils.stringifyException(exception));
+              StringUtils.stringifyException(exception), false);
         }
       }
     } catch (Throwable throwable) {
-      LOG.fatal("Error running child : "
+      LOG.error("Error running child : "
     	        + StringUtils.stringifyException(throwable));
       if (taskid != null) {
         if (!ShutdownHookManager.get().isShutdownInProgress()) {
@@ -214,7 +218,7 @@ class YarnChild {
           String cause =
               tCause == null ? throwable.getMessage() : StringUtils
                   .stringifyException(tCause);
-          umbilical.fatalError(taskid, cause);
+          umbilical.fatalError(taskid, cause, false);
         }
       }
     } finally {
@@ -286,11 +290,10 @@ class YarnChild {
   private static void configureTask(JobConf job, Task task,
       Credentials credentials, Token<JobTokenIdentifier> jt) throws IOException {
     job.setCredentials(credentials);
-    
-    ApplicationAttemptId appAttemptId =
-        ConverterUtils.toContainerId(
-            System.getenv(Environment.CONTAINER_ID.name()))
-            .getApplicationAttemptId();
+
+    ApplicationAttemptId appAttemptId = ContainerId.fromString(
+        System.getenv(Environment.CONTAINER_ID.name()))
+        .getApplicationAttemptId();
     LOG.debug("APPLICATION_ATTEMPT_ID: " + appAttemptId);
     // Set it in conf, so as to be able to be used the the OutputCommitter.
     job.setInt(MRJobConfig.APPLICATION_ATTEMPT_ID,
@@ -346,7 +349,7 @@ class YarnChild {
       out = FileSystem.create(localFs, jobFile, urw_gr);
       conf.writeXml(out);
     } finally {
-      IOUtils.cleanup(LOG, out);
+      IOUtils.cleanupWithLogger(LOG, out);
     }
   }
 

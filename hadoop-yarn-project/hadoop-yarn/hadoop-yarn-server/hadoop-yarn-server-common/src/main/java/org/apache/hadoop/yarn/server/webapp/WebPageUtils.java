@@ -49,16 +49,15 @@ public class WebPageUtils {
       boolean isFairSchedulerPage, boolean isResourceManager) {
     StringBuilder sb = new StringBuilder();
     sb.append("[\n")
-      .append("{'sType':'string', 'aTargets': [0]")
+      .append("{'sType':'natural', 'aTargets': [0]")
       .append(", 'mRender': parseHadoopID }")
-      .append("\n, {'sType':'numeric', 'aTargets': " +
-          (isFairSchedulerPage ? "[6, 7]": "[6, 7]"))
+      .append("\n, {'sType':'numeric', 'aTargets': [6, 7, 8]")
       .append(", 'mRender': renderHadoopDate }")
       .append("\n, {'sType':'numeric', bSearchable:false, 'aTargets':");
     if (isFairSchedulerPage) {
-      sb.append("[13]");
+      sb.append("[15]");
     } else if (isResourceManager) {
-      sb.append("[13]");
+      sb.append("[17]");
     } else {
       sb.append("[9]");
     }
@@ -76,7 +75,7 @@ public class WebPageUtils {
 
   private static String getAttemptsTableColumnDefs() {
     StringBuilder sb = new StringBuilder();
-    return sb.append("[\n").append("{'sType':'string', 'aTargets': [0]")
+    return sb.append("[\n").append("{'sType':'natural', 'aTargets': [0]")
       .append(", 'mRender': parseHadoopID }")
       .append("\n, {'sType':'numeric', 'aTargets': [1]")
       .append(", 'mRender': renderHadoopDate }]").toString();
@@ -92,8 +91,14 @@ public class WebPageUtils {
 
   private static String getContainersTableColumnDefs() {
     StringBuilder sb = new StringBuilder();
-    return sb.append("[\n").append("{'sType':'string', 'aTargets': [0]")
+    return sb.append("[\n").append("{'sType':'natural', 'aTargets': [0]")
       .append(", 'mRender': parseHadoopID }]").toString();
+  }
+
+  public static String resourceRequestsTableInit() {
+    return tableInit().append(", 'aaData': resourceRequestsTableData")
+        .append(", bDeferRender: true").append(", bProcessing: true}")
+        .toString();
   }
 
 }

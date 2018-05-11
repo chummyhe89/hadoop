@@ -25,6 +25,7 @@ import static org.junit.Assert.fail;
 import java.io.IOException;
 import java.security.PrivilegedExceptionAction;
 import java.util.Random;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import org.apache.commons.logging.Log;
@@ -46,7 +47,7 @@ import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
-import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
+import org.apache.hadoop.hdfs.server.datanode.InternalDataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.io.IOUtils;
@@ -56,6 +57,7 @@ import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.GenericTestUtils.DelayAnswer;
 import org.apache.hadoop.test.MultithreadedTestUtil.RepeatingTestThread;
 import org.apache.hadoop.test.MultithreadedTestUtil.TestContext;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Shell.ShellCommandExecutor;
 import org.apache.log4j.Level;
 import org.junit.Test;
@@ -141,8 +143,9 @@ public class TestPipelinesFailover {
       MethodToTestIdempotence methodToTest) throws Exception {
     Configuration conf = new Configuration();
     conf.setInt(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
-    // Don't check replication periodically.
-    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1000);
+    // Don't check low redundancy periodically.
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY,
+        1000);
     
     FSDataOutputStream stm = null;
     MiniDFSCluster cluster = newMiniCluster(conf, 3);
@@ -276,12 +279,13 @@ public class TestPipelinesFailover {
     // Disable permissions so that another user can recover the lease.
     conf.setBoolean(DFSConfigKeys.DFS_PERMISSIONS_ENABLED_KEY, false);
     conf.setInt(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
-    
+
     FSDataOutputStream stm = null;
     final MiniDFSCluster cluster = newMiniCluster(conf, 3);
     try {
       cluster.waitActive();
       cluster.transitionToActive(0);
+      cluster.setBlockRecoveryTimeout(TimeUnit.SECONDS.toMillis(1));
       Thread.sleep(500);
 
       LOG.info("Starting with NN 0 active");
@@ -357,8 +361,8 @@ public class TestPipelinesFailover {
       // active.
       DataNode primaryDN = cluster.getDataNode(expectedPrimary.getIpcPort());
       DatanodeProtocolClientSideTranslatorPB nnSpy =
-          DataNodeTestUtils.spyOnBposToNN(primaryDN, nn0);
-      
+          InternalDataNodeTestUtils.spyOnBposToNN(primaryDN, nn0);
+
       // Delay the commitBlockSynchronization call
       DelayAnswer delayer = new DelayAnswer(LOG);
       Mockito.doAnswer(delayer).when(nnSpy).commitBlockSynchronization(
@@ -429,28 +433,26 @@ public class TestPipelinesFailover {
     // The following section of code is to help debug HDFS-6694 about
     // this test that fails from time to time due to "too many open files".
     //
-    String[] scmd = new String[] {"/bin/sh", "-c", "ulimit -a"};
-    ShellCommandExecutor sce = new ShellCommandExecutor(scmd);
-    sce.execute();
+    LOG.info("HDFS-6694 Debug Data BEGIN");
 
-    System.out.println("HDFS-6694 Debug Data BEGIN===");
-    System.out.println("'ulimit -a' output:\n" + sce.getOutput());
+    String[][] scmds = new String[][] {
+      {"/bin/sh", "-c", "ulimit -a"},
+      {"hostname"},
+      {"ifconfig", "-a"}
+    };
 
-    scmd = new String[] {"hostname"};
-    sce = new ShellCommandExecutor(scmd);
-    sce.execute();
-    System.out.println("'hostname' output:\n" + sce.getOutput());
+    for (String[] scmd: scmds) {
+      String scmd_str = StringUtils.join(" ", scmd);
+      try {
+        ShellCommandExecutor sce = new ShellCommandExecutor(scmd);
+        sce.execute();
+        LOG.info("'" + scmd_str + "' output:\n" + sce.getOutput());
+      } catch (IOException e) {
+        LOG.warn("Error when running '" + scmd_str + "'", e);
+      }
+    }
 
-    scmd = new String[] {"ifconfig"};
-    sce = new ShellCommandExecutor(scmd);
-    sce.execute();
-    System.out.println("'ifconfig' output:\n" + sce.getOutput());
-
-    scmd = new String[] {"whoami"};
-    sce = new ShellCommandExecutor(scmd);
-    sce.execute();
-    System.out.println("'whoami' output:\n" + sce.getOutput());
-    System.out.println("===HDFS-6694 Debug Data END");
+    LOG.info("HDFS-6694 Debug Data END");
 
     HAStressTestHarness harness = new HAStressTestHarness();
     // Disable permissions so that another user can recover the lease.

@@ -27,8 +27,6 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.concurrent.ForkJoinPool;
-import java.util.concurrent.RecursiveAction;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -36,18 +34,18 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion;
-import org.apache.hadoop.hdfs.server.blockmanagement.BlockStoragePolicySuite;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NamenodeRole;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.RollingUpgradeStartupOption;
@@ -61,7 +59,6 @@ import org.apache.hadoop.hdfs.server.common.Util;
 import org.apache.hadoop.hdfs.server.namenode.FSImageStorageInspector.FSImageFile;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeDirType;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
-import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.Phase;
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.StartupProgress;
 import org.apache.hadoop.hdfs.server.protocol.CheckpointCommand;
@@ -70,10 +67,9 @@ import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.util.Canceler;
-import org.apache.hadoop.hdfs.util.EnumCounters;
 import org.apache.hadoop.hdfs.util.MD5FileUtils;
-import org.apache.hadoop.hdfs.util.ReadOnlyList;
 import org.apache.hadoop.io.MD5Hash;
+import org.apache.hadoop.util.ExitUtil;
 import org.apache.hadoop.util.Time;
 
 import com.google.common.base.Joiner;
@@ -92,6 +88,10 @@ public class FSImage implements Closeable {
   protected FSEditLog editLog = null;
   private boolean isUpgradeFinalized = false;
 
+  // If true, then image corruption was detected. The NameNode process will
+  // exit immediately after saving the image.
+  private AtomicBoolean exitAfterSave = new AtomicBoolean(false);
+
   protected NNStorage storage;
   
   /**
@@ -103,7 +103,16 @@ public class FSImage implements Closeable {
   final private Configuration conf;
 
   protected NNStorageRetentionManager archivalManager;
-  private int quotaInitThreads;
+
+  /**
+   * The collection of newly added storage directories. These are partially
+   * formatted then later fully populated along with a VERSION file.
+   * For HA, the second part is done when the next checkpoint is saved.
+   * This set will be cleared once a VERSION file is created.
+   * For non-HA, a new fsimage will be locally generated along with a new
+   * VERSION file. This set is not used for non-HA mode.
+   */
+  private Set<StorageDirectory> newDirs = null;
 
   /* Used to make sure there are no concurrent checkpoints for a given txid
    * The checkpoint here could be one of the following operations.
@@ -147,17 +156,12 @@ public class FSImage implements Closeable {
       storage.setRestoreFailedStorage(true);
     }
 
-    this.quotaInitThreads = conf.getInt(
-        DFSConfigKeys.DFS_NAMENODE_QUOTA_INIT_THREADS_KEY,
-        DFSConfigKeys.DFS_NAMENODE_QUOTA_INIT_THREADS_DEFAULT);
-
-    this.editLog = new FSEditLog(conf, storage, editsDirs);
-    
+    this.editLog = FSEditLog.newInstance(conf, storage, editsDirs);
     archivalManager = new NNStorageRetentionManager(conf, storage, editLog);
   }
  
   void format(FSNamesystem fsn, String clusterId) throws IOException {
-    long fileCount = fsn.getTotalFiles();
+    long fileCount = fsn.getFilesTotal();
     // Expect 1 file, which is the root inode
     Preconditions.checkState(fileCount == 1,
         "FSImage.format should be called with an uninitialized namesystem, has " +
@@ -273,9 +277,26 @@ public class FSImage implements Closeable {
         throw new IOException(StorageState.NON_EXISTENT + 
                               " state cannot be here");
       case NOT_FORMATTED:
+        // Create a dir structure, but not the VERSION file. The presence of
+        // VERSION is checked in the inspector's needToSave() method and
+        // saveNamespace is triggered if it is absent. This will bring
+        // the storage state uptodate along with a new VERSION file.
+        // If HA is enabled, NNs start up as standby so saveNamespace is not
+        // triggered.
         LOG.info("Storage directory " + sd.getRoot() + " is not formatted.");
         LOG.info("Formatting ...");
         sd.clearDirectory(); // create empty currrent dir
+        // For non-HA, no further action is needed here, as saveNamespace will
+        // take care of the rest.
+        if (!target.isHaEnabled()) {
+          continue;
+        }
+        // If HA is enabled, save the dirs to create a version file later when
+        // a checkpoint image is saved.
+        if (newDirs == null) {
+          newDirs = new HashSet<StorageDirectory>();
+        }
+        newDirs.add(sd);
         break;
       default:
         break;
@@ -301,7 +322,27 @@ public class FSImage implements Closeable {
     
     return loadFSImage(target, startOpt, recovery);
   }
-  
+
+  /**
+   * Create a VERSION file in the newly added storage directories.
+   */
+  private void initNewDirs() {
+    if (newDirs == null) {
+      return;
+    }
+    for (StorageDirectory sd : newDirs) {
+      try {
+        storage.writeProperties(sd);
+        LOG.info("Wrote VERSION in the new storage, " + sd.getCurrentDir());
+      } catch (IOException e) {
+        // Failed to create a VERSION file. Report the error.
+        storage.reportErrorOnFile(sd.getVersionFile());
+      }
+    }
+    newDirs.clear();
+    newDirs = null;
+  }
+
   /**
    * For each storage directory, performs recovery of incomplete transitions
    * (eg. upgrade, rollback, checkpoint) and inserts the directory's storage
@@ -551,7 +592,7 @@ public class FSImage implements Closeable {
 
     // and save it but keep the same checkpointTime
     saveNamespace(target);
-    getStorage().writeAll();
+    updateStorageVersion();
   }
   
   void finalizeUpgrade(boolean finalizeEditLog) throws IOException {
@@ -683,8 +724,11 @@ public class FSImage implements Closeable {
         imageFile = imageFiles.get(i);
         loadFSImageFile(target, recovery, imageFile, startOpt);
         break;
-      } catch (IOException ioe) {
-        LOG.error("Failed to load image from " + imageFile, ioe);
+      } catch (IllegalReservedPathException ie) {
+        throw new IOException("Failed to load image from " + imageFile,
+            ie);
+      } catch (Exception e) {
+        LOG.error("Failed to load image from " + imageFile, e);
         target.clear();
         imageFile = null;
       }
@@ -692,7 +736,8 @@ public class FSImage implements Closeable {
     // Failed to load any images, error out
     if (imageFile == null) {
       FSEditLog.closeAllStreams(editStreams);
-      throw new IOException("Failed to load an FSImage file!");
+      throw new IOException("Failed to load FSImage file, see error(s) " +
+          "above for more info.");
     }
     prog.endPhase(Phase.LOADING_FSIMAGE);
     
@@ -733,7 +778,7 @@ public class FSImage implements Closeable {
 
   void loadFSImageFile(FSNamesystem target, MetaRecoveryContext recovery,
       FSImageFile imageFile, StartupOption startupOption) throws IOException {
-    LOG.debug("Planning to load image :\n" + imageFile);
+    LOG.info("Planning to load image: " + imageFile);
     StorageDirectory sdForProperties = imageFile.sd;
     storage.readProperties(sdForProperties, startupOption);
 
@@ -804,9 +849,9 @@ public class FSImage implements Closeable {
    */
   private boolean needsResaveBasedOnStaleCheckpoint(
       File imageFile, long numEditsLoaded) {
-    final long checkpointPeriod = conf.getLong(
-        DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_PERIOD_KEY, 
-        DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_PERIOD_DEFAULT);
+    final long checkpointPeriod = conf.getTimeDuration(
+        DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_PERIOD_KEY,
+        DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_PERIOD_DEFAULT, TimeUnit.SECONDS);
     final long checkpointTxnCount = conf.getLong(
         DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_TXNS_KEY,
         DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_TXNS_DEFAULT);
@@ -853,123 +898,9 @@ public class FSImage implements Closeable {
       }
     } finally {
       FSEditLog.closeAllStreams(editStreams);
-      // update the counts
-      updateCountForQuota(target.getBlockManager().getStoragePolicySuite(),
-          target.dir.rootDir, quotaInitThreads);
     }
     prog.endPhase(Phase.LOADING_EDITS);
     return lastAppliedTxId - prevLastAppliedTxId;
-  }
-
-  /**
-   * Update the count of each directory with quota in the namespace.
-   * A directory's count is defined as the total number inodes in the tree
-   * rooted at the directory.
-   * 
-   * This is an update of existing state of the filesystem and does not
-   * throw QuotaExceededException.
-   */
-  static void updateCountForQuota(BlockStoragePolicySuite bsps,
-      INodeDirectory root, int threads) {
-    threads = (threads < 1) ? 1 : threads;
-    LOG.info("Initializing quota with " + threads + " thread(s)");
-    long start = Time.now();
-    QuotaCounts counts = new QuotaCounts.Builder().build();
-    ForkJoinPool p = new ForkJoinPool(threads);
-    RecursiveAction task = new InitQuotaTask(bsps, root.getStoragePolicyID(),
-        root, counts);
-    p.execute(task);
-    task.join();
-    p.shutdown();
-    LOG.info("Quota initialization completed in " + (Time.now() - start) +
-        " milliseconds\n" + counts);
-  }
-
-  /**
-   * parallel initialization using fork-join.
-   */
-  private static class InitQuotaTask extends RecursiveAction {
-    private final INodeDirectory dir;
-    private final QuotaCounts counts;
-    private final BlockStoragePolicySuite bsps;
-    private final byte blockStoragePolicyId;
-
-    public InitQuotaTask(BlockStoragePolicySuite bsps,
-        byte blockStoragePolicyId, INodeDirectory dir, QuotaCounts counts) {
-      this.dir = dir;
-      this.counts = counts;
-      this.bsps = bsps;
-      this.blockStoragePolicyId = blockStoragePolicyId;
-    }
-
-    public void compute() {
-      QuotaCounts myCounts =  new QuotaCounts.Builder().build();
-      dir.computeQuotaUsage4CurrentDirectory(bsps, blockStoragePolicyId,
-          myCounts);
-
-      ReadOnlyList<INode> children =
-          dir.getChildrenList(Snapshot.CURRENT_STATE_ID);
-
-      if (children.size() > 0) {
-        List<InitQuotaTask> subtasks = new ArrayList<InitQuotaTask>();
-        for (INode child : children) {
-          final byte childPolicyId =
-              child.getStoragePolicyIDForQuota(blockStoragePolicyId);
-          if (child.isDirectory()) {
-            subtasks.add(new InitQuotaTask(bsps, childPolicyId,
-                child.asDirectory(), myCounts));
-          } else {
-            // file or symlink. count using the local counts variable
-            myCounts.add(child.computeQuotaUsage(bsps, childPolicyId, false,
-                Snapshot.CURRENT_STATE_ID));
-          }
-        }
-        // invoke and wait for completion
-        invokeAll(subtasks);
-      }
-
-      if (dir.isQuotaSet()) {
-        // check if quota is violated. It indicates a software bug.
-        final QuotaCounts q = dir.getQuotaCounts();
-
-        final long nsConsumed = myCounts.getNameSpace();
-        final long nsQuota = q.getNameSpace();
-        if (Quota.isViolated(nsQuota, nsConsumed)) {
-          LOG.warn("Namespace quota violation in image for "
-              + dir.getFullPathName()
-              + " quota = " + nsQuota + " < consumed = " + nsConsumed);
-        }
-
-        final long ssConsumed = myCounts.getStorageSpace();
-        final long ssQuota = q.getStorageSpace();
-        if (Quota.isViolated(ssQuota, ssConsumed)) {
-          LOG.warn("Storagespace quota violation in image for "
-              + dir.getFullPathName()
-              + " quota = " + ssQuota + " < consumed = " + ssConsumed);
-        }
-
-        final EnumCounters<StorageType> tsConsumed = myCounts.getTypeSpaces();
-        for (StorageType t : StorageType.getTypesSupportingQuota()) {
-          final long typeSpace = tsConsumed.get(t);
-          final long typeQuota = q.getTypeSpaces().get(t);
-          if (Quota.isViolated(typeQuota, typeSpace)) {
-            LOG.warn("Storage type quota violation in image for "
-                + dir.getFullPathName()
-                + " type = " + t.toString() + " quota = "
-                + typeQuota + " < consumed " + typeSpace);
-          }
-        }
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Setting quota for " + dir + "\n" + myCounts);
-        }
-        dir.getDirectoryWithQuotaFeature().setSpaceConsumed(nsConsumed,
-            ssConsumed, tsConsumed);
-      }
-
-      synchronized(counts) {
-        counts.add(myCounts);
-      }
-    }
   }
 
   /**
@@ -1029,8 +960,14 @@ public class FSImage implements Closeable {
     
     FSImageFormatProtobuf.Saver saver = new FSImageFormatProtobuf.Saver(context);
     FSImageCompression compression = FSImageCompression.createCompression(conf);
-    saver.save(newFile, compression);
-    
+    long numErrors = saver.save(newFile, compression);
+    if (numErrors > 0) {
+      // The image is likely corrupted.
+      LOG.error("Detected " + numErrors + " errors while saving FsImage " +
+          dstFile);
+      exitAfterSave.set(true);
+    }
+
     MD5FileUtils.saveMD5File(dstFile, saver.getSavedDigest());
     storage.setMostRecentCheckpointInfo(txid, Time.now());
   }
@@ -1043,7 +980,7 @@ public class FSImage implements Closeable {
       Canceler canceler) throws IOException {
     FSImageCompression compression =
         FSImageCompression.createCompression(conf);
-    long txid = getLastAppliedOrWrittenTxId();
+    long txid = getCorrectLastAppliedOrWrittenTxId();
     SaveNamespaceContext ctx = new SaveNamespaceContext(source, txid,
         canceler);
     FSImageFormat.Saver saver = new FSImageFormat.Saver(ctx);
@@ -1138,7 +1075,7 @@ public class FSImage implements Closeable {
       final long checkpointTxId = image.getCheckpointTxId();
       final long checkpointAge = Time.now() - imageFile.lastModified();
       if (checkpointAge <= timeWindow * 1000 &&
-          checkpointTxId >= this.getLastAppliedOrWrittenTxId() - txGap) {
+          checkpointTxId >= this.getCorrectLastAppliedOrWrittenTxId() - txGap) {
         return false;
       }
     }
@@ -1165,7 +1102,7 @@ public class FSImage implements Closeable {
     if (editLogWasOpen) {
       editLog.endCurrentLogSegment(true);
     }
-    long imageTxId = getLastAppliedOrWrittenTxId();
+    long imageTxId = getCorrectLastAppliedOrWrittenTxId();
     if (!addToCheckpointing(imageTxId)) {
       throw new IOException(
           "FS image is being downloaded from another NN at txid " + imageTxId);
@@ -1174,7 +1111,7 @@ public class FSImage implements Closeable {
       try {
         saveFSImageInAllDirs(source, nnf, imageTxId, canceler);
         if (!source.isRollingUpgrade()) {
-          storage.writeAll();
+          updateStorageVersion();
         }
       } finally {
         if (editLogWasOpen) {
@@ -1189,6 +1126,14 @@ public class FSImage implements Closeable {
       }
     } finally {
       removeFromCheckpointing(imageTxId);
+    }
+    //Update NameDirSize Metric
+    getStorage().updateNameDirSize();
+
+    if (exitAfterSave.get()) {
+      LOG.fatal("NameNode process will exit now... The saved FsImage " +
+          nnf + " is potentially corrupted.");
+      ExitUtil.terminate(-1);
     }
   }
 
@@ -1257,8 +1202,11 @@ public class FSImage implements Closeable {
   
       // Since we now have a new checkpoint, we can clean up some
       // old edit logs and checkpoints.
-      purgeOldStorage(nnf);
-      archivalManager.purgeCheckpoints(NameNodeFile.IMAGE_NEW);
+      // Do not purge anything if we just wrote a corrupted FsImage.
+      if (!exitAfterSave.get()) {
+        purgeOldStorage(nnf);
+        archivalManager.purgeCheckpoints(NameNodeFile.IMAGE_NEW);
+      }
     } finally {
       // Notify any threads waiting on the checkpoint to be canceled
       // that it is complete.
@@ -1370,6 +1318,8 @@ public class FSImage implements Closeable {
     // we won't miss this log segment on a restart if the edits directories
     // go missing.
     storage.writeTransactionIdFileToStorage(getEditLog().getCurSegmentTxId());
+    //Update NameDirSize Metric
+    getStorage().updateNameDirSize();
     return new CheckpointSignature(this);
   }
 
@@ -1468,6 +1418,9 @@ public class FSImage implements Closeable {
     if (txid > storage.getMostRecentCheckpointTxId()) {
       storage.setMostRecentCheckpointInfo(txid, Time.now());
     }
+
+    // Create a version file in any new storage directory.
+    initNewDirs();
   }
 
   @Override
@@ -1532,6 +1485,15 @@ public class FSImage implements Closeable {
   }
 
   public long getLastAppliedOrWrittenTxId() {
+    return Math.max(lastAppliedTxId,
+        editLog != null ? editLog.getLastWrittenTxIdWithoutLock() : 0);
+  }
+
+  /**
+   * This method holds a lock of FSEditLog to get the correct value.
+   * This method must not be used for metrics.
+   */
+  public long getCorrectLastAppliedOrWrittenTxId() {
     return Math.max(lastAppliedTxId,
         editLog != null ? editLog.getLastWrittenTxId() : 0);
   }

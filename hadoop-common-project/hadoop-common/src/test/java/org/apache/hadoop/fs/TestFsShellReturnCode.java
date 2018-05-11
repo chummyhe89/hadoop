@@ -33,25 +33,27 @@ import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.shell.CommandFactory;
 import org.apache.hadoop.fs.shell.FsCommand;
 import org.apache.hadoop.fs.shell.PathData;
 import org.apache.hadoop.io.IOUtils;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY;
+
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.Shell;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * This test validates that chmod, chown, chgrp returning correct exit codes
  * 
  */
 public class TestFsShellReturnCode {
-  private static final Log LOG = LogFactory
-      .getLog("org.apache.hadoop.fs.TestFsShellReturnCode");
+  private static final Logger LOG = LoggerFactory
+      .getLogger("org.apache.hadoop.fs.TestFsShellReturnCode");
 
   private static final Configuration conf = new Configuration();
   private static FileSystem fileSys;
@@ -63,9 +65,9 @@ public class TestFsShellReturnCode {
     fileSys = FileSystem.get(conf);
     fsShell = new FsShell(conf);
   }
-  
-  private static String TEST_ROOT_DIR = System.getProperty("test.build.data",
-      "build/test/data/testCHReturnCode");
+
+  private static String TEST_ROOT_DIR =
+      GenericTestUtils.getTempPath("testCHReturnCode");
 
   static void writeFile(FileSystem fs, Path name) throws Exception {
     FSDataOutputStream stm = fs.create(name);

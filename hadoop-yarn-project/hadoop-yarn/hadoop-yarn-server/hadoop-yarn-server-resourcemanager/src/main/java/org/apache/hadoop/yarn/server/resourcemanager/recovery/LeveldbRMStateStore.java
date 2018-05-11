@@ -29,6 +29,8 @@ import java.io.File;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map.Entry;
+import java.util.Timer;
+import java.util.TimerTask;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -38,6 +40,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.security.token.delegation.DelegationKey;
+import org.apache.hadoop.util.Time;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ReservationId;
@@ -48,7 +51,7 @@ import org.apache.hadoop.yarn.proto.YarnServerResourceManagerRecoveryProtos.AMRM
 import org.apache.hadoop.yarn.proto.YarnServerResourceManagerRecoveryProtos.EpochProto;
 import org.apache.hadoop.yarn.proto.YarnServerResourceManagerRecoveryProtos.ApplicationAttemptStateDataProto;
 import org.apache.hadoop.yarn.proto.YarnServerResourceManagerRecoveryProtos.ApplicationStateDataProto;
-import org.apache.hadoop.yarn.proto.YarnServerResourceManagerRecoveryProtos.ReservationAllocationStateProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.ReservationAllocationStateProto;
 import org.apache.hadoop.yarn.security.client.RMDelegationTokenIdentifier;
 import org.apache.hadoop.yarn.server.records.Version;
 import org.apache.hadoop.yarn.server.records.impl.pb.VersionPBImpl;
@@ -61,12 +64,10 @@ import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.AM
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.ApplicationAttemptStateDataPBImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.ApplicationStateDataPBImpl;
 import org.apache.hadoop.yarn.server.utils.LeveldbIterator;
-import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.fusesource.leveldbjni.JniDBFactory;
 import org.fusesource.leveldbjni.internal.NativeDB;
 import org.iq80.leveldb.DB;
 import org.iq80.leveldb.DBException;
-import org.iq80.leveldb.Logger;
 import org.iq80.leveldb.Options;
 import org.iq80.leveldb.WriteBatch;
 
@@ -97,6 +98,8 @@ public class LeveldbRMStateStore extends RMStateStore {
       .newInstance(1, 1);
 
   private DB db;
+  private Timer compactionTimer;
+  private long compactionIntervalMsec;
 
   private String getApplicationNodeKey(ApplicationId appId) {
     return RM_APP_ROOT + SEPARATOR + appId;
@@ -128,6 +131,9 @@ public class LeveldbRMStateStore extends RMStateStore {
 
   @Override
   protected void initInternal(Configuration conf) throws Exception {
+    compactionIntervalMsec = conf.getLong(
+        YarnConfiguration.RM_LEVELDB_COMPACTION_INTERVAL_SECS,
+        YarnConfiguration.DEFAULT_RM_LEVELDB_COMPACTION_INTERVAL_SECS) * 1000;
   }
 
   private Path getStorageDir() throws IOException {
@@ -149,10 +155,14 @@ public class LeveldbRMStateStore extends RMStateStore {
 
   @Override
   protected void startInternal() throws Exception {
+    db = openDatabase();
+    startCompactionTimer();
+  }
+
+  protected DB openDatabase() throws Exception {
     Path storeRoot = createStorageDir();
     Options options = new Options();
     options.createIfMissing(false);
-    options.logger(new LeveldbLogger());
     LOG.info("Using state database at " + storeRoot + " for recovery");
     File dbfile = new File(storeRoot.toString());
     try {
@@ -172,10 +182,24 @@ public class LeveldbRMStateStore extends RMStateStore {
         throw e;
       }
     }
+    return db;
+  }
+
+  private void startCompactionTimer() {
+    if (compactionIntervalMsec > 0) {
+      compactionTimer = new Timer(
+          this.getClass().getSimpleName() + " compaction timer", true);
+      compactionTimer.schedule(new CompactionTimerTask(),
+          compactionIntervalMsec, compactionIntervalMsec);
+    }
   }
 
   @Override
   protected void closeInternal() throws Exception {
+    if (compactionTimer != null) {
+      compactionTimer.cancel();
+      compactionTimer = null;
+    }
     if (db != null) {
       db.close();
       db = null;
@@ -185,6 +209,11 @@ public class LeveldbRMStateStore extends RMStateStore {
   @VisibleForTesting
   boolean isClosed() {
     return db == null;
+  }
+
+  @VisibleForTesting
+  DB getDatabase() {
+    return db;
   }
 
   @Override
@@ -223,14 +252,14 @@ public class LeveldbRMStateStore extends RMStateStore {
 
   @Override
   public synchronized long getAndIncrementEpoch() throws Exception {
-    long currentEpoch = 0;
+    long currentEpoch = baseEpoch;
     byte[] dbKeyBytes = bytes(EPOCH_NODE);
     try {
       byte[] data = db.get(dbKeyBytes);
       if (data != null) {
         currentEpoch = EpochProto.parseFrom(data).getEpoch();
       }
-      EpochProto proto = Epoch.newInstance(currentEpoch + 1).getProto();
+      EpochProto proto = Epoch.newInstance(nextEpoch(currentEpoch)).getProto();
       db.put(dbKeyBytes, proto.toByteArray());
     } catch (DBException e) {
       throw new IOException(e);
@@ -257,6 +286,9 @@ public class LeveldbRMStateStore extends RMStateStore {
       while (iter.hasNext()) {
         Entry<byte[],byte[]> entry = iter.next();
         String key = asString(entry.getKey());
+        if (!key.startsWith(RM_RESERVATION_KEY_PREFIX)) {
+          break;
+        }
 
         String planReservationString =
             key.substring(RM_RESERVATION_KEY_PREFIX.length());
@@ -375,11 +407,10 @@ public class LeveldbRMStateStore extends RMStateStore {
 
   private RMDelegationTokenIdentifierData loadDelegationToken(byte[] data)
       throws IOException {
-    RMDelegationTokenIdentifierData tokenData =
-        new RMDelegationTokenIdentifierData();
+    RMDelegationTokenIdentifierData tokenData = null;
     DataInputStream in = new DataInputStream(new ByteArrayInputStream(data));
     try {
-      tokenData.readFields(in);
+      tokenData = RMStateStoreUtils.readRMDelegationTokenIdentifierData(in);
     } finally {
       IOUtils.cleanup(LOG, in);
     }
@@ -472,7 +503,7 @@ public class LeveldbRMStateStore extends RMStateStore {
 
   private ApplicationStateData createApplicationState(String appIdStr,
       byte[] data) throws IOException {
-    ApplicationId appId = ConverterUtils.toApplicationId(appIdStr);
+    ApplicationId appId = ApplicationId.fromString(appIdStr);
     ApplicationStateDataPBImpl appState =
         new ApplicationStateDataPBImpl(
             ApplicationStateDataProto.parseFrom(data));
@@ -500,10 +531,25 @@ public class LeveldbRMStateStore extends RMStateStore {
     return createApplicationState(appId.toString(), data);
   }
 
+  @VisibleForTesting
+  ApplicationAttemptStateData loadRMAppAttemptState(
+      ApplicationAttemptId attemptId) throws IOException {
+    String attemptKey = getApplicationAttemptNodeKey(attemptId);
+    byte[] data = null;
+    try {
+      data = db.get(bytes(attemptKey));
+    } catch (DBException e) {
+      throw new IOException(e);
+    }
+    if (data == null) {
+      return null;
+    }
+    return createAttemptState(attemptId.toString(), data);
+  }
+
   private ApplicationAttemptStateData createAttemptState(String itemName,
       byte[] data) throws IOException {
-    ApplicationAttemptId attemptId =
-        ConverterUtils.toApplicationAttemptId(itemName);
+    ApplicationAttemptId attemptId = ApplicationAttemptId.fromString(itemName);
     ApplicationAttemptStateDataPBImpl attemptState =
         new ApplicationAttemptStateDataPBImpl(
             ApplicationAttemptStateDataProto.parseFrom(data));
@@ -575,6 +621,22 @@ public class LeveldbRMStateStore extends RMStateStore {
   }
 
   @Override
+  public synchronized void removeApplicationAttemptInternal(
+      ApplicationAttemptId attemptId)
+      throws IOException {
+    String attemptKey = getApplicationAttemptNodeKey(attemptId);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Removing state for attempt " + attemptId + " at "
+          + attemptKey);
+    }
+    try {
+      db.delete(bytes(attemptKey));
+    } catch (DBException e) {
+      throw new IOException(e);
+    }
+  }
+
+  @Override
   protected void removeApplicationStateInternal(ApplicationStateData appState)
       throws IOException {
     ApplicationId appId =
@@ -621,14 +683,6 @@ public class LeveldbRMStateStore extends RMStateStore {
     } catch (DBException e) {
       throw new IOException(e);
     }
-  }
-
-  @Override
-  protected void updateReservationState(
-      ReservationAllocationStateProto reservationAllocation, String planName,
-      String reservationIdName) throws Exception {
-    storeReservationState(reservationAllocation, planName,
-        reservationIdName);
   }
 
   @Override
@@ -801,12 +855,18 @@ public class LeveldbRMStateStore extends RMStateStore {
     return numEntries;
   }
 
-  private static class LeveldbLogger implements Logger {
-    private static final Log LOG = LogFactory.getLog(LeveldbLogger.class);
-
+  private class CompactionTimerTask extends TimerTask {
     @Override
-    public void log(String message) {
-      LOG.info(message);
+    public void run() {
+      long start = Time.monotonicNow();
+      LOG.info("Starting full compaction cycle");
+      try {
+        db.compactRange(null, null);
+      } catch (DBException e) {
+        LOG.error("Error compacting database", e);
+      }
+      long duration = Time.monotonicNow() - start;
+      LOG.info("Full compaction cycle completed in " + duration + " msec");
     }
   }
 }

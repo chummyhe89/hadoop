@@ -28,6 +28,7 @@ import javax.xml.bind.annotation.XmlSeeAlso;
 import javax.xml.bind.annotation.XmlTransient;
 
 import org.apache.hadoop.yarn.api.records.QueueState;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueResourceQuotas;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceUsage;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CSQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.PlanQueue;
@@ -60,36 +61,38 @@ public class CapacitySchedulerQueueInfo {
   protected long allocatedContainers;
   protected long reservedContainers;
   protected long pendingContainers;
+  protected QueueCapacitiesInfo capacities;
+  protected ResourcesInfo resources;
+  protected ResourceInfo minEffectiveCapacity;
+  protected ResourceInfo maxEffectiveCapacity;
 
   CapacitySchedulerQueueInfo() {
   };
 
-  CapacitySchedulerQueueInfo(CSQueue q, String nodeLabel) {
-    QueueCapacities qCapacities = q.getQueueCapacities();
-    ResourceUsage queueResourceUsage = q.getQueueResourceUsage();
+  CapacitySchedulerQueueInfo(CSQueue q) {
 
     queuePath = q.getQueuePath();
-    capacity = qCapacities.getCapacity(nodeLabel) * 100;
-    usedCapacity = qCapacities.getUsedCapacity(nodeLabel) * 100;
+    capacity = q.getCapacity() * 100;
+    usedCapacity = q.getUsedCapacity() * 100;
 
-    maxCapacity = qCapacities.getMaximumCapacity(nodeLabel);
+    maxCapacity = q.getMaximumCapacity();
     if (maxCapacity < EPSILON || maxCapacity > 1f)
       maxCapacity = 1f;
     maxCapacity *= 100;
 
     absoluteCapacity =
-        cap(qCapacities.getAbsoluteCapacity(nodeLabel), 0f, 1f) * 100;
+        cap(q.getAbsoluteCapacity(), 0f, 1f) * 100;
     absoluteMaxCapacity =
-        cap(qCapacities.getAbsoluteMaximumCapacity(nodeLabel), 0f, 1f) * 100;
+        cap(q.getAbsoluteMaximumCapacity(), 0f, 1f) * 100;
     absoluteUsedCapacity =
-        cap(qCapacities.getAbsoluteUsedCapacity(nodeLabel), 0f, 1f) * 100;
+        cap(q.getAbsoluteUsedCapacity(), 0f, 1f) * 100;
     numApplications = q.getNumApplications();
     allocatedContainers = q.getMetrics().getAllocatedContainers();
     pendingContainers = q.getMetrics().getPendingContainers();
     reservedContainers = q.getMetrics().getReservedContainers();
     queueName = q.getQueueName();
     state = q.getState();
-    resourcesUsed = new ResourceInfo(queueResourceUsage.getUsed(nodeLabel));
+    resourcesUsed = new ResourceInfo(q.getUsedResources());
     if (q instanceof PlanQueue && !((PlanQueue) q).showReservationsAsQueues()) {
       hideReservationQueues = true;
     }
@@ -100,6 +103,27 @@ public class CapacitySchedulerQueueInfo {
       nodeLabels.addAll(labelSet);
       Collections.sort(nodeLabels);
     }
+    QueueCapacities qCapacities = q.getQueueCapacities();
+    QueueResourceQuotas qResQuotas = q.getQueueResourceQuotas();
+    populateQueueCapacities(qCapacities, qResQuotas);
+
+    ResourceUsage queueResourceUsage = q.getQueueResourceUsage();
+    populateQueueResourceUsage(queueResourceUsage);
+
+    minEffectiveCapacity = new ResourceInfo(
+        q.getQueueResourceQuotas().getEffectiveMinResource());
+    maxEffectiveCapacity = new ResourceInfo(
+        q.getQueueResourceQuotas().getEffectiveMaxResource());
+  }
+
+  protected void populateQueueResourceUsage(ResourceUsage queueResourceUsage) {
+    resources = new ResourcesInfo(queueResourceUsage, false);
+  }
+
+  protected void populateQueueCapacities(QueueCapacities qCapacities,
+      QueueResourceQuotas qResQuotas) {
+    capacities = new QueueCapacitiesInfo(qCapacities, qResQuotas,
+        false);
   }
 
   public float getCapacity() {
@@ -178,5 +202,25 @@ public class CapacitySchedulerQueueInfo {
   
   public ArrayList<String> getNodeLabels() {
     return this.nodeLabels;
+  }
+
+  public QueueCapacitiesInfo getCapacities() {
+    return capacities;
+  }
+
+  public ResourcesInfo getResources() {
+    return resources;
+  }
+
+  public ResourceInfo getMinEffectiveCapacity(){
+    return minEffectiveCapacity;
+  }
+
+  public ResourceInfo getMaxEffectiveCapacity(){
+    return maxEffectiveCapacity;
+  }
+
+  public boolean isLeafQueue() {
+    return getQueues() == null;
   }
 }

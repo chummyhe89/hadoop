@@ -55,7 +55,9 @@ public class TestFSImageWithAcl {
 
   @AfterClass
   public static void tearDown() {
-    cluster.shutdown();
+    if (cluster != null) {
+      cluster.shutdown();
+    }
   }
 
   private void testAcl(boolean persistNamespace) throws IOException {
@@ -136,13 +138,15 @@ public class TestFSImageWithAcl {
       aclEntry(DEFAULT, MASK, ALL),
       aclEntry(DEFAULT, OTHER, READ_EXECUTE) };
 
+    short permExpected = (short)010775;
+
     AclEntry[] fileReturned = fs.getAclStatus(filePath).getEntries()
       .toArray(new AclEntry[0]);
     Assert.assertArrayEquals(fileExpected, fileReturned);
     AclEntry[] subdirReturned = fs.getAclStatus(subdirPath).getEntries()
       .toArray(new AclEntry[0]);
     Assert.assertArrayEquals(subdirExpected, subdirReturned);
-    assertPermission(fs, subdirPath, (short)010755);
+    assertPermission(fs, subdirPath, permExpected);
 
     restart(fs, persistNamespace);
 
@@ -152,7 +156,7 @@ public class TestFSImageWithAcl {
     subdirReturned = fs.getAclStatus(subdirPath).getEntries()
       .toArray(new AclEntry[0]);
     Assert.assertArrayEquals(subdirExpected, subdirReturned);
-    assertPermission(fs, subdirPath, (short)010755);
+    assertPermission(fs, subdirPath, permExpected);
 
     aclSpec = Lists.newArrayList(aclEntry(DEFAULT, USER, "foo", READ_WRITE));
     fs.modifyAclEntries(dirPath, aclSpec);
@@ -163,7 +167,7 @@ public class TestFSImageWithAcl {
     subdirReturned = fs.getAclStatus(subdirPath).getEntries()
       .toArray(new AclEntry[0]);
     Assert.assertArrayEquals(subdirExpected, subdirReturned);
-    assertPermission(fs, subdirPath, (short)010755);
+    assertPermission(fs, subdirPath, permExpected);
 
     restart(fs, persistNamespace);
 
@@ -173,7 +177,7 @@ public class TestFSImageWithAcl {
     subdirReturned = fs.getAclStatus(subdirPath).getEntries()
       .toArray(new AclEntry[0]);
     Assert.assertArrayEquals(subdirExpected, subdirReturned);
-    assertPermission(fs, subdirPath, (short)010755);
+    assertPermission(fs, subdirPath, permExpected);
 
     fs.removeAcl(dirPath);
 
@@ -183,7 +187,7 @@ public class TestFSImageWithAcl {
     subdirReturned = fs.getAclStatus(subdirPath).getEntries()
       .toArray(new AclEntry[0]);
     Assert.assertArrayEquals(subdirExpected, subdirReturned);
-    assertPermission(fs, subdirPath, (short)010755);
+    assertPermission(fs, subdirPath, permExpected);
 
     restart(fs, persistNamespace);
 
@@ -193,7 +197,7 @@ public class TestFSImageWithAcl {
     subdirReturned = fs.getAclStatus(subdirPath).getEntries()
       .toArray(new AclEntry[0]);
     Assert.assertArrayEquals(subdirExpected, subdirReturned);
-    assertPermission(fs, subdirPath, (short)010755);
+    assertPermission(fs, subdirPath, permExpected);
   }
 
   @Test
@@ -204,6 +208,35 @@ public class TestFSImageWithAcl {
   @Test
   public void testEditLogDefaultAclNewChildren() throws IOException {
     doTestDefaultAclNewChildren(false);
+  }
+
+  @Test
+  public void testRootACLAfterLoadingFsImage() throws IOException {
+    DistributedFileSystem fs = cluster.getFileSystem();
+    Path rootdir = new Path("/");
+    AclEntry e1 = new AclEntry.Builder().setName("foo")
+        .setPermission(ALL).setScope(ACCESS).setType(GROUP).build();
+    AclEntry e2 = new AclEntry.Builder().setName("bar")
+        .setPermission(READ).setScope(ACCESS).setType(GROUP).build();
+    fs.modifyAclEntries(rootdir, Lists.newArrayList(e1, e2));
+
+    AclStatus s = cluster.getNamesystem().getAclStatus(rootdir.toString());
+    AclEntry[] returned =
+        Lists.newArrayList(s.getEntries()).toArray(new AclEntry[0]);
+    Assert.assertArrayEquals(
+        new AclEntry[] { aclEntry(ACCESS, GROUP, READ_EXECUTE),
+            aclEntry(ACCESS, GROUP, "bar", READ),
+            aclEntry(ACCESS, GROUP, "foo", ALL) }, returned);
+
+    // restart - hence save and load from fsimage
+    restart(fs, true);
+
+    s = cluster.getNamesystem().getAclStatus(rootdir.toString());
+    returned = Lists.newArrayList(s.getEntries()).toArray(new AclEntry[0]);
+    Assert.assertArrayEquals(
+        new AclEntry[] { aclEntry(ACCESS, GROUP, READ_EXECUTE),
+            aclEntry(ACCESS, GROUP, "bar", READ),
+            aclEntry(ACCESS, GROUP, "foo", ALL) }, returned);
   }
 
   /**

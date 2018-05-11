@@ -235,9 +235,9 @@ header.bs-docs-nav, header.bs-docs-nav .navbar-brand {
     content: "\e013";
 }
 
-.dfshealth-node-decommisioned:before {
-    color: #eea236;
-    content: "\e136";
+.dfshealth-node-decommissioned:before {
+    color: #bc5f04;
+    content: "\e090";
 }
 
 .dfshealth-node-down:before {
@@ -245,9 +245,14 @@ header.bs-docs-nav, header.bs-docs-nav .navbar-brand {
     content: "\e101";
 }
 
-.dfshealth-node-down-decommisioned:before {
+.dfshealth-node-down-decommissioned:before {
     color: #2e6da6;
     content: "\e017";
+}
+
+.dfshealth-node-down-maintenance:before {
+    color: #eea236;
+    content: "\e136";
 }
 
 .dfshealth-node-legend {
@@ -263,4 +268,42 @@ header.bs-docs-nav, header.bs-docs-nav .navbar-brand {
 
 .dfshealth-node-legend li:before {
     padding-right: 5pt;
+}
+
+.explorer-entry .explorer-browse-links { cursor: pointer; }
+.explorer-entry .glyphicon-trash { cursor: pointer; }
+
+.popover {
+  max-width: 400px;
+}
+
+.explorer-popover-perm-body table  {
+  width: 30rem;
+}
+
+.explorer-popover-perm-body table > tbody > tr > td {
+  text-align: center;
+}
+
+.explorer-popover-perm-body label {
+    display:inline;
+    margin-bottom: 0;
+    font-weight: normal;
+    cursor: pointer;
+}
+
+.cut-paste {
+  width: 75px;
+  min-width: 75px;
+  float: right;
+  left: 75px;
+}
+
+.bar rect {
+    fill: #5FA33F;
+}
+
+.bar text {
+    fill: #fff;
+    font: 10px sans-serif;
 }

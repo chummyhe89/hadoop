@@ -83,6 +83,7 @@ public class TestBlockPlacementPolicyRackFaultTolerant {
   public void teardown() {
     if (cluster != null) {
       cluster.shutdown();
+      cluster = null;
     }
   }
 
@@ -108,11 +109,11 @@ public class TestBlockPlacementPolicyRackFaultTolerant {
         // Create the file with client machine
         HdfsFileStatus fileStatus = namesystem.startFile(src, perm,
             clientMachine, clientMachine, EnumSet.of(CreateFlag.CREATE), true,
-            replication, DEFAULT_BLOCK_SIZE, null, false);
+            replication, DEFAULT_BLOCK_SIZE, null, null, false);
 
         //test chooseTarget for new file
         LocatedBlock locatedBlock = nameNodeRpc.addBlock(src, clientMachine,
-            null, null, fileStatus.getFileId(), null);
+            null, null, fileStatus.getFileId(), null, null);
         doTestLocatedBlock(replication, locatedBlock);
 
         //test chooseTarget for existing file.
@@ -138,11 +139,11 @@ public class TestBlockPlacementPolicyRackFaultTolerant {
     // Create the file with client machine
     HdfsFileStatus fileStatus = namesystem.startFile(src, perm,
         clientMachine, clientMachine, EnumSet.of(CreateFlag.CREATE), true,
-        (short) 20, DEFAULT_BLOCK_SIZE, null, false);
+        (short) 20, DEFAULT_BLOCK_SIZE, null, null, false);
 
     //test chooseTarget for new file
     LocatedBlock locatedBlock = nameNodeRpc.addBlock(src, clientMachine,
-        null, null, fileStatus.getFileId(), null);
+        null, null, fileStatus.getFileId(), null, null);
     doTestLocatedBlock(20, locatedBlock);
 
     DatanodeInfo[] locs = locatedBlock.getLocations();

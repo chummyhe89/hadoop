@@ -19,6 +19,7 @@
 package org.apache.hadoop.yarn.nodelabels;
 
 import java.io.EOFException;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.List;
@@ -52,11 +53,6 @@ import org.apache.hadoop.yarn.server.api.protocolrecords.impl.pb.ReplaceLabelsOn
 import com.google.common.collect.Sets;
 
 public class FileSystemNodeLabelsStore extends NodeLabelsStore {
-
-  public FileSystemNodeLabelsStore(CommonNodeLabelsManager mgr) {
-    super(mgr);
-  }
-
   protected static final Log LOG = LogFactory.getLog(FileSystemNodeLabelsStore.class);
 
   protected static final String DEFAULT_DIR_NAME = "node-labels";
@@ -69,8 +65,8 @@ public class FileSystemNodeLabelsStore extends NodeLabelsStore {
 
   Path fsWorkingPath;
   FileSystem fs;
-  FSDataOutputStream editlogOs;
-  Path editLogPath;
+  private FSDataOutputStream editlogOs;
+  private Path editLogPath;
   
   private String getDefaultFSNodeLabelsRootDir() throws IOException {
     // default is in local: /tmp/hadoop-yarn-${user}/node-labels/
@@ -96,15 +92,10 @@ public class FileSystemNodeLabelsStore extends NodeLabelsStore {
     IOUtils.cleanup(LOG, fs, editlogOs);
   }
 
-  private void setFileSystem(Configuration conf) throws IOException {
+  void setFileSystem(Configuration conf) throws IOException {
     Configuration confCopy = new Configuration(conf);
-    confCopy.setBoolean("dfs.client.retry.policy.enabled", true);
-    String retryPolicy =
-        confCopy.get(YarnConfiguration.FS_NODE_LABELS_STORE_RETRY_POLICY_SPEC,
-            YarnConfiguration.DEFAULT_FS_NODE_LABELS_STORE_RETRY_POLICY_SPEC);
-    confCopy.set("dfs.client.retry.policy.spec", retryPolicy);
     fs = fsWorkingPath.getFileSystem(confCopy);
-    
+
     // if it's local file system, use RawLocalFileSystem instead of
     // LocalFileSystem, the latter one doesn't support append.
     if (fs.getScheme().equals("file")) {
@@ -158,12 +149,43 @@ public class FileSystemNodeLabelsStore extends NodeLabelsStore {
       ensureCloseEditlogFile();
     }
   }
+  
+  protected void loadFromMirror(Path newMirrorPath, Path oldMirrorPath)
+      throws IOException {
+    // If mirror.new exists, read from mirror.new,
+    FSDataInputStream is = null;
+    try {
+      is = fs.open(newMirrorPath);
+    } catch (FileNotFoundException e) {
+      try {
+        is = fs.open(oldMirrorPath);
+      } catch (FileNotFoundException ignored) {
+
+      }
+    }
+    if (null != is) {
+      List<NodeLabel> labels = new AddToClusterNodeLabelsRequestPBImpl(
+          AddToClusterNodeLabelsRequestProto.parseDelimitedFrom(is))
+              .getNodeLabels();
+      mgr.addToCluserNodeLabels(labels);
+
+      if (mgr.isCentralizedConfiguration()) {
+        // Only load node to labels mapping while using centralized configuration
+        Map<NodeId, Set<String>> nodeToLabels =
+            new ReplaceLabelsOnNodeRequestPBImpl(
+                ReplaceLabelsOnNodeRequestProto.parseDelimitedFrom(is))
+                  .getNodeToLabels();
+        mgr.replaceLabelsOnNode(nodeToLabels);
+      }
+      is.close();
+    }
+  }
 
   /* (non-Javadoc)
    * @see org.apache.hadoop.yarn.nodelabels.NodeLabelsStore#recover(boolean)
    */
   @Override
-  public void recover(boolean ignoreNodeToLabelsMappings) throws YarnException,
+  public void recover() throws YarnException,
       IOException {
     /*
      * Steps of recover
@@ -179,31 +201,18 @@ public class FileSystemNodeLabelsStore extends NodeLabelsStore {
     // Open mirror from serialized file
     Path mirrorPath = new Path(fsWorkingPath, MIRROR_FILENAME);
     Path oldMirrorPath = new Path(fsWorkingPath, MIRROR_FILENAME + ".old");
-
-    FSDataInputStream is = null;
-    if (fs.exists(mirrorPath)) {
-      is = fs.open(mirrorPath);
-    } else if (fs.exists(oldMirrorPath)) {
-      is = fs.open(oldMirrorPath);
-    }
-
-    if (null != is) {
-      List<NodeLabel> labels =
-          new AddToClusterNodeLabelsRequestPBImpl(
-              AddToClusterNodeLabelsRequestProto.parseDelimitedFrom(is)).getNodeLabels();
-      Map<NodeId, Set<String>> nodeToLabels =
-          new ReplaceLabelsOnNodeRequestPBImpl(
-              ReplaceLabelsOnNodeRequestProto.parseDelimitedFrom(is))
-              .getNodeToLabels();
-      mgr.addToCluserNodeLabels(labels);
-      mgr.replaceLabelsOnNode(nodeToLabels);
-      is.close();
-    }
+    
+    loadFromMirror(mirrorPath, oldMirrorPath);
 
     // Open and process editlog
     editLogPath = new Path(fsWorkingPath, EDITLOG_FILENAME);
-    if (fs.exists(editLogPath)) {
+    FSDataInputStream is;
+    try {
       is = fs.open(editLogPath);
+    } catch (FileNotFoundException e) {
+      is = null;
+    }
+    if (null != is) {
 
       while (true) {
         try {
@@ -231,7 +240,7 @@ public class FileSystemNodeLabelsStore extends NodeLabelsStore {
                 new ReplaceLabelsOnNodeRequestPBImpl(
                     ReplaceLabelsOnNodeRequestProto.parseDelimitedFrom(is))
                     .getNodeToLabels();
-            if (!ignoreNodeToLabelsMappings) {
+            if (mgr.isCentralizedConfiguration()) {
               /*
                * In case of Distributed NodeLabels setup,
                * ignoreNodeToLabelsMappings will be set to true and recover will
@@ -248,6 +257,7 @@ public class FileSystemNodeLabelsStore extends NodeLabelsStore {
           break;
         }
       }
+      is.close();
     }
 
     // Serialize current mirror to mirror.writing

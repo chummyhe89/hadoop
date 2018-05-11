@@ -265,7 +265,7 @@ public class TestDFSStartupVersions {
           conf.getStrings(DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY), "current");
       log("DataNode version info", DATA_NODE, i, versions[i]);
       UpgradeUtilities.createDataNodeVersionFile(storage,
-          versions[i].storageInfo, bpid, versions[i].blockPoolId);
+          versions[i].storageInfo, bpid, versions[i].blockPoolId, conf);
       try {
         cluster.startDataNodes(conf, 1, false, StartupOption.REGULAR, null);
       } catch (Exception ignore) {
@@ -282,7 +282,10 @@ public class TestDFSStartupVersions {
   @After
   public void tearDown() throws Exception {
     LOG.info("Shutting down MiniDFSCluster");
-    if (cluster != null) cluster.shutdown();
+    if (cluster != null) {
+      cluster.shutdown();
+      cluster = null;
+    }
   }
   
   public static void main(String[] args) throws Exception {

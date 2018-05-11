@@ -42,13 +42,13 @@ public class MiniQJMHACluster {
 
   public static final String NAMESERVICE = "ns1";
   private static final Random RANDOM = new Random();
-  private int basePort = 10000;
 
   public static class Builder {
     private final Configuration conf;
     private StartupOption startOpt = null;
     private int numNNs = 2;
     private final MiniDFSCluster.Builder dfsBuilder;
+    private boolean forceRemoteEditsOnly = false;
 
     public Builder(Configuration conf) {
       this.conf = conf;
@@ -73,6 +73,11 @@ public class MiniQJMHACluster {
       this.numNNs = nns;
       return this;
     }
+
+    public Builder setForceRemoteEditsOnly(boolean val) {
+      this.forceRemoteEditsOnly = val;
+      return this;
+    }
   }
 
   public static MiniDFSNNTopology createDefaultTopology(int nns, int startingPort) {
@@ -92,18 +97,23 @@ public class MiniQJMHACluster {
   private MiniQJMHACluster(Builder builder) throws IOException {
     this.conf = builder.conf;
     int retryCount = 0;
+    int basePort = 10000;
+
     while (true) {
       try {
         basePort = 10000 + RANDOM.nextInt(1000) * 4;
+        LOG.info("Set MiniQJMHACluster basePort to " + basePort);
         // start 3 journal nodes
         journalCluster = new MiniJournalCluster.Builder(conf).format(true)
             .build();
+        journalCluster.waitActive();
+        journalCluster.setNamenodeSharedEditsConf(NAMESERVICE);
         URI journalURI = journalCluster.getQuorumJournalURI(NAMESERVICE);
 
         // start cluster with specified NameNodes
         MiniDFSNNTopology topology = createDefaultTopology(builder.numNNs, basePort);
 
-        initHAConf(journalURI, builder.conf, builder.numNNs);
+        initHAConf(journalURI, builder, basePort);
 
         // First start up the NNs just to format the namespace. The MinIDFSCluster
         // has no way to just format the NameNodes without also starting them.
@@ -122,22 +132,32 @@ public class MiniQJMHACluster {
 
         // restart the cluster
         cluster.restartNameNodes();
-        ++retryCount;
         break;
       } catch (BindException e) {
+        if (cluster != null) {
+          cluster.shutdown(true);
+          cluster = null;
+        }
+        ++retryCount;
         LOG.info("MiniQJMHACluster port conflicts, retried " +
             retryCount + " times");
       }
     }
   }
 
-  private Configuration initHAConf(URI journalURI, Configuration conf, int numNNs) {
+  private Configuration initHAConf(URI journalURI, Builder builder,
+      int basePort) {
     conf.set(DFSConfigKeys.DFS_NAMENODE_SHARED_EDITS_DIR_KEY,
         journalURI.toString());
+    if (builder.forceRemoteEditsOnly) {
+      conf.set(DFSConfigKeys.DFS_NAMENODE_EDITS_DIR_KEY, journalURI.toString());
+      conf.set(DFSConfigKeys.DFS_NAMENODE_EDITS_DIR_REQUIRED_KEY,
+          journalURI.toString());
+    }
 
-    List<String> nns = new ArrayList<String>(numNNs);
+    List<String> nns = new ArrayList<>(builder.numNNs);
     int port = basePort;
-    for (int i = 0; i < numNNs; i++) {
+    for (int i = 0; i < builder.numNNs; i++) {
       nns.add("127.0.0.1:" + port);
       // increment by 2 each time to account for the http port in the config setting
       port += 2;

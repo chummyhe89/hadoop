@@ -95,7 +95,7 @@ public class TestPseudoLocalFs {
 
       // validate fileSize
       String[] parts = path.toUri().getPath().split("\\.");
-      long expectedFileSize = Long.valueOf(parts[parts.length - 1]);
+      long expectedFileSize = Long.parseLong(parts[parts.length - 1]);
       assertEquals("Invalid file size.", expectedFileSize, stat.getLen());
     } else {
       assertTrue("getFileStatus() did not throw Exception for invalid file "
@@ -224,7 +224,7 @@ public class TestPseudoLocalFs {
 
     // Validate operations on valid qualified path
     path = new Path("myPsedoFile.1237");
-    path = path.makeQualified(pfs);
+    path = pfs.makeQualified(path);
     validateGetFileStatus(pfs, path, true);
     validateCreate(pfs, path, true);
     validateOpen(pfs, path, true);

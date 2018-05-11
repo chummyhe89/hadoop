@@ -19,6 +19,7 @@ package org.apache.hadoop.hdfs.tools;
 
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_KEYTAB_FILE_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY;
+import static org.apache.hadoop.util.ExitUtil.terminate;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -39,6 +40,7 @@ import org.apache.hadoop.ha.HealthMonitor;
 import org.apache.hadoop.ha.ZKFailoverController;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.hdfs.HDFSPolicyProvider;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
@@ -166,7 +168,7 @@ public class DFSZKFailoverController extends ZKFailoverController {
 
   @Override
   public void loginAsFCUser() throws IOException {
-    InetSocketAddress socAddr = NameNode.getAddress(conf);
+    InetSocketAddress socAddr = DFSUtilClient.getNNAddress(conf);
     SecurityUtil.login(conf, DFS_NAMENODE_KEYTAB_FILE_KEY,
         DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY, socAddr.getHostName());
   }
@@ -189,13 +191,13 @@ public class DFSZKFailoverController extends ZKFailoverController {
         new HdfsConfiguration(), args);
     DFSZKFailoverController zkfc = DFSZKFailoverController.create(
         parser.getConfiguration());
-    int retCode = 0;
     try {
-      retCode = zkfc.run(parser.getRemainingArgs());
+      System.exit(zkfc.run(parser.getRemainingArgs()));
     } catch (Throwable t) {
-      LOG.fatal("Got a fatal error, exiting now", t);
+      LOG.fatal("DFSZKFailOverController exiting due to earlier exception "
+          + t);
+      terminate(1, t);
     }
-    System.exit(retCode);
   }
 
   @Override

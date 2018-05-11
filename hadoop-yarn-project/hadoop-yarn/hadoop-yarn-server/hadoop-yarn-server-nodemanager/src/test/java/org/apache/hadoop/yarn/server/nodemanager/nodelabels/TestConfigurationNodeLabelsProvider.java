@@ -25,14 +25,17 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.TimerTask;
 
+import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.nodelabels.NodeLabelTestBase;
 import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 public class TestConfigurationNodeLabelsProvider extends NodeLabelTestBase {
@@ -48,13 +51,20 @@ public class TestConfigurationNodeLabelsProvider extends NodeLabelTestBase {
 
   private ConfigurationNodeLabelsProvider nodeLabelsProvider;
 
-  @Before
-  public void setup() {
+  private static ClassLoader classContextClassLoader;
+
+  @BeforeClass
+  public static void create() {
+    classContextClassLoader = Thread.currentThread().getContextClassLoader();
     loader =
         new XMLPathClassLoader(
             TestConfigurationNodeLabelsProvider.class.getClassLoader());
     testRootDir.mkdirs();
+    Thread.currentThread().setContextClassLoader(loader);
+  }
 
+  @Before
+  public void setup() {
     nodeLabelsProvider = new ConfigurationNodeLabelsProvider();
   }
 
@@ -62,44 +72,48 @@ public class TestConfigurationNodeLabelsProvider extends NodeLabelTestBase {
   public void tearDown() throws Exception {
     if (nodeLabelsProvider != null) {
       nodeLabelsProvider.close();
-    }
-    if (testRootDir.exists()) {
-      FileContext.getLocalFSFileContext().delete(
-          new Path(testRootDir.getAbsolutePath()), true);
+      nodeLabelsProvider.stop();
     }
   }
 
-  private Configuration getConfForNodeLabels() {
-    Configuration conf = new Configuration();
-    conf.set(YarnConfiguration.NM_PROVIDER_CONFIGURED_NODE_LABELS, "A,B,CX");
-    return conf;
+  @AfterClass
+  public static void remove() throws Exception {
+    if (classContextClassLoader != null) {
+      // testcases will fail after testcases present in this class, as
+      // yarn-site.xml will be deleted
+      Thread.currentThread().setContextClassLoader(classContextClassLoader);
+    }
+    if (testRootDir.exists()) {
+      FileContext.getLocalFSFileContext()
+          .delete(new Path(testRootDir.getAbsolutePath()), true);
+    }
   }
 
   @Test
   public void testNodeLabelsFromConfig() throws IOException,
       InterruptedException {
-    Configuration conf = getConfForNodeLabels();
+    Configuration conf = new Configuration();
+    modifyConf("A");
     nodeLabelsProvider.init(conf);
     // test for ensuring labels are set during initialization of the class
     nodeLabelsProvider.start();
-    Thread.sleep(1000l); // sleep so that timer has run once during
-                         // initialization
-    assertNLCollectionEquals(toNodeLabelSet("A", "B", "CX"),
+    assertNLCollectionEquals(toNodeLabelSet("A"),
         nodeLabelsProvider.getNodeLabels());
 
     // test for valid Modification
     TimerTask timerTask = nodeLabelsProvider.getTimerTask();
-    modifyConfAndCallTimer(timerTask, "X,y,Z");
-    assertNLCollectionEquals(toNodeLabelSet("X", "y", "Z"),
+    modifyConf("X");
+    timerTask.run();
+    assertNLCollectionEquals(toNodeLabelSet("X"),
         nodeLabelsProvider.getNodeLabels());
   }
 
   @Test
   public void testConfigForNoTimer() throws Exception {
-    Configuration conf = getConfForNodeLabels();
+    Configuration conf = new Configuration();
+    modifyConf("A");
     conf.setLong(YarnConfiguration.NM_NODE_LABELS_PROVIDER_FETCH_INTERVAL_MS,
         AbstractNodeLabelsProvider.DISABLE_NODE_LABELS_PROVIDER_FETCH_TIMER);
-
     nodeLabelsProvider.init(conf);
     nodeLabelsProvider.start();
     Assert
@@ -108,22 +122,37 @@ public class TestConfigurationNodeLabelsProvider extends NodeLabelTestBase {
             nodeLabelsProvider.nodeLabelsScheduler);
     // Ensure that even though timer is not run, node labels are fetched at least once so
     // that NM registers/updates Labels with RM
-    assertNLCollectionEquals(toNodeLabelSet("A", "B", "CX"),
+    assertNLCollectionEquals(toNodeLabelSet("A"),
         nodeLabelsProvider.getNodeLabels());
   }
 
-  private static void modifyConfAndCallTimer(TimerTask timerTask,
-      String nodeLabels) throws FileNotFoundException, IOException {
+  @Test
+  public void testConfigTimer() throws Exception {
     Configuration conf = new Configuration();
-    conf.set(YarnConfiguration.NM_PROVIDER_CONFIGURED_NODE_LABELS, nodeLabels);
-    conf.writeXml(new FileOutputStream(nodeLabelsConfigFile));
-    ClassLoader actualLoader = Thread.currentThread().getContextClassLoader();
-    try {
-      Thread.currentThread().setContextClassLoader(loader);
-      timerTask.run();
-    } finally {
-      Thread.currentThread().setContextClassLoader(actualLoader);
-    }
+    modifyConf("A");
+    conf.setLong(YarnConfiguration.NM_NODE_LABELS_PROVIDER_FETCH_INTERVAL_MS,
+        1000);
+    nodeLabelsProvider.init(conf);
+    nodeLabelsProvider.start();
+    // Ensure that even though timer is not run, node labels are fetched at
+    // least once so
+    // that NM registers/updates Labels with RM
+    assertNLCollectionEquals(toNodeLabelSet("A"),
+        nodeLabelsProvider.getNodeLabels());
+    modifyConf("X");
+    Thread.sleep(1500);
+    assertNLCollectionEquals(toNodeLabelSet("X"),
+        nodeLabelsProvider.getNodeLabels());
+
+  }
+
+  private static void modifyConf(String nodeLabels)
+      throws FileNotFoundException, IOException {
+    Configuration conf = new Configuration();
+    conf.set(YarnConfiguration.NM_PROVIDER_CONFIGURED_NODE_PARTITION, nodeLabels);
+    FileOutputStream confStream = new FileOutputStream(nodeLabelsConfigFile);
+    conf.writeXml(confStream);
+    IOUtils.closeQuietly(confStream);
   }
 
   private static class XMLPathClassLoader extends ClassLoader {

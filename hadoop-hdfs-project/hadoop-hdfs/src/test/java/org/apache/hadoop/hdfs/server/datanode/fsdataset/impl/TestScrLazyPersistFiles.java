@@ -19,12 +19,9 @@ package org.apache.hadoop.hdfs.server.datanode.fsdataset.impl;
 import com.google.common.base.Preconditions;
 import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.fs.ChecksumException;
-import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.ClientContext;
 import org.apache.hadoop.hdfs.DFSTestUtil;
-import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.client.HdfsDataInputStream;
 import org.apache.hadoop.hdfs.server.datanode.BlockMetadataHeader;
 import org.apache.hadoop.io.nativeio.NativeIO;
@@ -45,6 +42,7 @@ import java.util.concurrent.TimeoutException;
 
 import static org.apache.hadoop.fs.StorageType.DEFAULT;
 import static org.apache.hadoop.fs.StorageType.RAM_DISK;
+import static org.apache.hadoop.test.PlatformAssumptions.assumeNotWindows;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.assertThat;
@@ -64,8 +62,8 @@ public class TestScrLazyPersistFiles extends LazyPersistTestCase {
 
   @Before
   public void before() {
-    Assume.assumeThat(NativeCodeLoader.isNativeCodeLoaded() && !Path.WINDOWS,
-        equalTo(true));
+    Assume.assumeTrue(NativeCodeLoader.isNativeCodeLoaded());
+    assumeNotWindows();
     Assume.assumeThat(DomainSocket.getLoadingFailureReason(), equalTo(null));
 
     final long osPageSize = NativeIO.POSIX.getCacheManipulator().getOperatingSystemPageSize();
@@ -264,9 +262,7 @@ public class TestScrLazyPersistFiles extends LazyPersistTestCase {
     // Corrupt the lazy-persisted checksum file, and verify that checksum
     // verification catches it.
     ensureFileReplicasOnStorageType(path1, DEFAULT);
-    File metaFile = cluster.getBlockMetadataFile(0,
-        DFSTestUtil.getFirstBlock(fs, path1));
-    MiniDFSCluster.corruptBlock(metaFile);
+    cluster.corruptMeta(0, DFSTestUtil.getFirstBlock(fs, path1));
     exception.expect(ChecksumException.class);
     DFSTestUtil.readFileBuffer(fs, path1);
   }

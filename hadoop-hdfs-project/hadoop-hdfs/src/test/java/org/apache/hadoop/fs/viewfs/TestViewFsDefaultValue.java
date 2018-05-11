@@ -29,6 +29,7 @@ import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_WRIT
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_REPLICATION_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_REPLICATION_KEY;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.IOException;
@@ -44,6 +45,8 @@ import org.apache.hadoop.fs.FileSystemTestHelper;
 import org.apache.hadoop.fs.FsConstants;
 import org.apache.hadoop.fs.FsServerDefaults;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.QuotaUsage;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.junit.AfterClass;
@@ -60,6 +63,7 @@ public class TestViewFsDefaultValue {
   
   static final String testFileDir = "/tmp/test/";
   static final String testFileName = testFileDir + "testFileStatusSerialziation";
+  static final String NOT_IN_MOUNTPOINT_FILENAME = "/NotInMountpointFile";
   private static MiniDFSCluster cluster;
   private static final FileSystemTestHelper fileSystemTestHelper = new FileSystemTestHelper(); 
   private static final Configuration CONF = new Configuration();
@@ -67,6 +71,8 @@ public class TestViewFsDefaultValue {
   private static FileSystem vfs;
   private static Path testFilePath;
   private static Path testFileDirPath;
+  // Use NotInMountpoint path to trigger the exception
+  private static Path notInMountpointPath;
 
   @BeforeClass
   public static void clusterSetupAtBegining() throws IOException,
@@ -83,12 +89,14 @@ public class TestViewFsDefaultValue {
     cluster.waitClusterUp();
     fHdfs = cluster.getFileSystem();
     fileSystemTestHelper.createFile(fHdfs, testFileName);
+    fileSystemTestHelper.createFile(fHdfs, NOT_IN_MOUNTPOINT_FILENAME);
     Configuration conf = ViewFileSystemTestSetup.createConfig();
     ConfigUtil.addLink(conf, "/tmp", new URI(fHdfs.getUri().toString() +
       "/tmp"));
     vfs = FileSystem.get(FsConstants.VIEWFS_URI, conf);
     testFileDirPath = new Path (testFileDir);
     testFilePath = new Path (testFileName);
+    notInMountpointPath = new Path(NOT_IN_MOUNTPOINT_FILENAME);
   }
 
 
@@ -102,7 +110,7 @@ public class TestViewFsDefaultValue {
     // but we are only looking at the defaultBlockSize, so this 
     // test should still pass
     try {
-      vfs.getDefaultBlockSize();
+      vfs.getDefaultBlockSize(notInMountpointPath);
       fail("getServerDefaults on viewFs did not throw excetion!");
     } catch (NotInMountpointException e) {
       assertEquals(vfs.getDefaultBlockSize(testFilePath), 
@@ -117,7 +125,7 @@ public class TestViewFsDefaultValue {
   public void testGetDefaultReplication()
       throws IOException, URISyntaxException {
     try {
-      vfs.getDefaultReplication();
+      vfs.getDefaultReplication(notInMountpointPath);
       fail("getDefaultReplication on viewFs did not throw excetion!");
     } catch (NotInMountpointException e) {
       assertEquals(vfs.getDefaultReplication(testFilePath), 
@@ -132,7 +140,7 @@ public class TestViewFsDefaultValue {
   @Test
   public void testServerDefaults() throws IOException {
     try {
-      FsServerDefaults serverDefaults = vfs.getServerDefaults();
+      vfs.getServerDefaults(notInMountpointPath);
       fail("getServerDefaults on viewFs did not throw excetion!");
     } catch (NotInMountpointException e) {
       FsServerDefaults serverDefaults = vfs.getServerDefaults(testFilePath);
@@ -160,10 +168,59 @@ public class TestViewFsDefaultValue {
     assertEquals(100, cs.getQuota()); 
     assertEquals(500, cs.getSpaceQuota()); 
   }
- 
+
+  /**
+   * Test that getQuotaUsage can be retrieved on the client side.
+   */
+  @Test
+  public void testGetQuotaUsage() throws IOException {
+    FileSystem hFs = cluster.getFileSystem(0);
+    final DistributedFileSystem dfs = (DistributedFileSystem)hFs;
+    dfs.setQuota(testFileDirPath, 100, 500);
+    QuotaUsage qu = vfs.getQuotaUsage(testFileDirPath);
+    assertEquals(100, qu.getQuota());
+    assertEquals(500, qu.getSpaceQuota());
+  }
+
+  /**
+   * Test that getQuotaUsage can be retrieved on the client side if
+   * storage types are defined.
+   */
+  @Test
+  public void testGetQuotaUsageWithStorageTypes() throws IOException {
+    FileSystem hFs = cluster.getFileSystem(0);
+    final DistributedFileSystem dfs = (DistributedFileSystem)hFs;
+    dfs.setQuotaByStorageType(testFileDirPath, StorageType.SSD, 500);
+    dfs.setQuotaByStorageType(testFileDirPath, StorageType.DISK, 600);
+    QuotaUsage qu = vfs.getQuotaUsage(testFileDirPath);
+    assertEquals(500, qu.getTypeQuota(StorageType.SSD));
+    assertEquals(600, qu.getTypeQuota(StorageType.DISK));
+  }
+
+  /**
+   * Test that getQuotaUsage can be retrieved on the client side if
+   * quota isn't defined.
+   */
+  @Test
+  public void testGetQuotaUsageWithQuotaDefined() throws IOException {
+    FileSystem hFs = cluster.getFileSystem(0);
+    final DistributedFileSystem dfs = (DistributedFileSystem)hFs;
+    dfs.setQuota(testFileDirPath, -1, -1);
+    dfs.setQuotaByStorageType(testFileDirPath, StorageType.SSD, -1);
+    dfs.setQuotaByStorageType(testFileDirPath, StorageType.DISK, -1);
+    QuotaUsage qu = vfs.getQuotaUsage(testFileDirPath);
+    assertEquals(-1, qu.getTypeQuota(StorageType.SSD));
+    assertEquals(-1, qu.getQuota());
+    assertEquals(-1, qu.getSpaceQuota());
+    assertEquals(2, qu.getFileAndDirectoryCount());
+    assertEquals(0, qu.getTypeConsumed(StorageType.SSD));
+    assertTrue(qu.getSpaceConsumed() > 0);
+  }
+
   @AfterClass
   public static void cleanup() throws IOException {
     fHdfs.delete(new Path(testFileName), true);
+    fHdfs.delete(notInMountpointPath, true);
   }
 
 }

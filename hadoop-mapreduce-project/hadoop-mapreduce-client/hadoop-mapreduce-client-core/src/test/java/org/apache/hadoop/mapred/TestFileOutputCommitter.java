@@ -23,7 +23,9 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.net.URI;
 
-import junit.framework.TestCase;
+import org.junit.Test;
+import static org.junit.Assert.*;
+import org.junit.Assert;
 
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -37,7 +39,7 @@ import org.apache.hadoop.io.Text;
 
 
 @SuppressWarnings("unchecked")
-public class TestFileOutputCommitter extends TestCase {
+public class TestFileOutputCommitter {
   private static Path outDir = new Path(System.getProperty("test.build.data",
       "/tmp"), "output");
 
@@ -152,14 +154,18 @@ public class TestFileOutputCommitter extends TestCase {
     validateContent(outDir);
     FileUtil.fullyDelete(new File(outDir.toString()));
   }
+
+  @Test
   public void testRecoveryV1() throws Exception {
     testRecoveryInternal(1, 1);
   }
 
+  @Test
   public void testRecoveryV2() throws Exception {
     testRecoveryInternal(2, 2);
   }
 
+  @Test
   public void testRecoveryUpgradeV1V2() throws Exception {
     testRecoveryInternal(1, 2);
   }
@@ -202,6 +208,116 @@ public class TestFileOutputCommitter extends TestCase {
     assert(dataFileFound && indexFileFound);
   }
 
+  @Test
+  public void testCommitterWithFailureV1() throws Exception {
+    testCommitterWithFailureInternal(1, 1);
+    testCommitterWithFailureInternal(1, 2);
+  }
+
+  @Test
+  public void testCommitterWithFailureV2() throws Exception {
+    testCommitterWithFailureInternal(2, 1);
+    testCommitterWithFailureInternal(2, 2);
+  }
+
+  private void testCommitterWithFailureInternal(int version, int maxAttempts) throws Exception {
+    JobConf conf = new JobConf();
+    FileOutputFormat.setOutputPath(conf, outDir);
+    conf.set(JobContext.TASK_ATTEMPT_ID, attempt);
+    conf.setInt(org.apache.hadoop.mapreduce.lib.output.
+        FileOutputCommitter.FILEOUTPUTCOMMITTER_ALGORITHM_VERSION, version);
+    conf.setInt(org.apache.hadoop.mapreduce.lib.output.FileOutputCommitter.
+        FILEOUTPUTCOMMITTER_FAILURE_ATTEMPTS, maxAttempts);
+    JobContext jContext = new JobContextImpl(conf, taskID.getJobID());
+    TaskAttemptContext tContext = new TaskAttemptContextImpl(conf, taskID);
+    FileOutputCommitter committer = new CommitterWithFailedThenSucceed();
+
+    // setup
+    committer.setupJob(jContext);
+    committer.setupTask(tContext);
+
+    // write output
+    TextOutputFormat theOutputFormat = new TextOutputFormat();
+    RecordWriter theRecordWriter =
+        theOutputFormat.getRecordWriter(null, conf, partFile, null);
+    writeOutput(theRecordWriter, tContext);
+
+    // do commit
+    if(committer.needsTaskCommit(tContext)) {
+      committer.commitTask(tContext);
+    }
+
+    try {
+      committer.commitJob(jContext);
+      // (1,1), (1,2), (2,1) shouldn't reach to here.
+      if (version == 1 || maxAttempts <= 1) {
+        Assert.fail("Commit successful: wrong behavior for version 1.");
+      }
+    } catch (IOException e) {
+      // (2,2) shouldn't reach to here.
+      if (version == 2 && maxAttempts > 2) {
+        Assert.fail("Commit failed: wrong behavior for version 2.");
+      }
+    }
+
+    FileUtil.fullyDelete(new File(outDir.toString()));
+  }
+
+  @Test
+  public void testCommitterWithDuplicatedCommitV1() throws Exception {
+    testCommitterWithDuplicatedCommitInternal(1);
+  }
+
+  @Test
+  public void testCommitterWithDuplicatedCommitV2() throws Exception {
+    testCommitterWithDuplicatedCommitInternal(2);
+  }
+
+  private void testCommitterWithDuplicatedCommitInternal(int version) throws
+      Exception {
+    JobConf conf = new JobConf();
+    FileOutputFormat.setOutputPath(conf, outDir);
+    conf.set(JobContext.TASK_ATTEMPT_ID, attempt);
+    conf.setInt(org.apache.hadoop.mapreduce.lib.output.
+        FileOutputCommitter.FILEOUTPUTCOMMITTER_ALGORITHM_VERSION, version);
+    JobContext jContext = new JobContextImpl(conf, taskID.getJobID());
+    TaskAttemptContext tContext = new TaskAttemptContextImpl(conf, taskID);
+    FileOutputCommitter committer = new FileOutputCommitter();
+
+    // setup
+    committer.setupJob(jContext);
+    committer.setupTask(tContext);
+
+    // write output
+    TextOutputFormat theOutputFormat = new TextOutputFormat();
+    RecordWriter theRecordWriter =
+        theOutputFormat.getRecordWriter(null, conf, partFile, null);
+    writeOutput(theRecordWriter, tContext);
+
+    // do commit
+    if(committer.needsTaskCommit(tContext)) {
+      committer.commitTask(tContext);
+    }
+    committer.commitJob(jContext);
+
+    // validate output
+    validateContent(outDir);
+
+    // commit again
+    try {
+      committer.commitJob(jContext);
+      if (version == 1) {
+        Assert.fail("Duplicate commit successful: wrong behavior " +
+            "for version 1.");
+      }
+    } catch (IOException e) {
+      if (version == 2) {
+        Assert.fail("Duplicate commit failed: wrong behavior for version 2.");
+      }
+    }
+    FileUtil.fullyDelete(new File(outDir.toString()));
+  }
+
   private void testCommitterInternal(int version) throws Exception {
     JobConf conf = new JobConf();
     FileOutputFormat.setOutputPath(conf, outDir);
@@ -233,10 +349,12 @@ public class TestFileOutputCommitter extends TestCase {
     FileUtil.fullyDelete(new File(outDir.toString()));
   }
 
+  @Test
   public void testCommitterV1() throws Exception {
     testCommitterInternal(1);
   }
 
+  @Test
   public void testCommitterV2() throws Exception {
     testCommitterInternal(2);
   }
@@ -273,18 +391,22 @@ public class TestFileOutputCommitter extends TestCase {
     FileUtil.fullyDelete(new File(outDir.toString()));
   }
 
+  @Test
   public void testMapFileOutputCommitterV1() throws Exception {
     testMapFileOutputCommitterInternal(1);
   }
 
+  @Test
   public void testMapFileOutputCommitterV2() throws Exception {
     testMapFileOutputCommitterInternal(2);
   }
 
+  @Test
   public void testMapOnlyNoOutputV1() throws Exception {
     testMapOnlyNoOutputInternal(1);
   }
 
+  @Test
   public void testMapOnlyNoOutputV2() throws Exception {
     testMapOnlyNoOutputInternal(2);
   }
@@ -349,10 +471,12 @@ public class TestFileOutputCommitter extends TestCase {
     FileUtil.fullyDelete(out);
   }
 
+  @Test
   public void testAbortV1() throws Exception {
     testAbortInternal(1);
   }
 
+  @Test
   public void testAbortV2() throws Exception {
     testAbortInternal(2);
   }
@@ -430,10 +554,12 @@ public class TestFileOutputCommitter extends TestCase {
     FileUtil.fullyDelete(new File(outDir.toString()));
   }
 
+  @Test
   public void testFailAbortV1() throws Exception {
     testFailAbortInternal(1);
   }
 
+  @Test
   public void testFailAbortV2() throws Exception {
     testFailAbortInternal(2);
   }
@@ -449,6 +575,50 @@ public class TestFileOutputCommitter extends TestCase {
       in.close();
     }
     return contents;
+  }
+
+  /**
+   * The class provides a overrided implementation of commitJobInternal which
+   * causes the commit failed for the first time then succeed.
+   */
+  public static class CommitterWithFailedThenSucceed extends
+      FileOutputCommitter {
+    boolean firstTimeFail = true;
+
+    public CommitterWithFailedThenSucceed() throws IOException {
+      super();
+    }
+
+    @Override
+    public void commitJob(JobContext context) throws IOException {
+      JobConf conf = context.getJobConf();
+      org.apache.hadoop.mapreduce.lib.output.FileOutputCommitter wrapped =
+          new CommitterFailedFirst(FileOutputFormat.getOutputPath(conf),
+              context);
+      wrapped.commitJob(context);
+    }
+  }
+
+  public static class CommitterFailedFirst extends
+      org.apache.hadoop.mapreduce.lib.output.FileOutputCommitter {
+    boolean firstTimeFail = true;
+
+    public CommitterFailedFirst(Path outputPath,
+        JobContext context) throws IOException {
+      super(outputPath, context);
+    }
+
+    @Override
+    protected void commitJobInternal(org.apache.hadoop.mapreduce.JobContext
+        context) throws IOException {
+      super.commitJobInternal(context);
+      if (firstTimeFail) {
+        firstTimeFail = false;
+        throw new IOException();
+      } else {
+        // succeed then, nothing to do
+      }
+    }
   }
 
 }

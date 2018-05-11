@@ -41,13 +41,15 @@ public class TcpPeerServer implements PeerServer {
    *
    * @param socketWriteTimeout    The Socket write timeout in ms.
    * @param bindAddr              The address to bind to.
+   * @param backlogLength         The length of the tcp accept backlog
    * @throws IOException
    */
   public TcpPeerServer(int socketWriteTimeout,
-        InetSocketAddress bindAddr) throws IOException {
+                       InetSocketAddress bindAddr,
+                       int backlogLength) throws IOException {
     this.serverSocket = (socketWriteTimeout > 0) ?
           ServerSocketChannel.open().socket() : new ServerSocket();
-    Server.bind(serverSocket, bindAddr, 0);
+    Server.bind(serverSocket, bindAddr, backlogLength);
   }
 
   /**
@@ -71,6 +73,11 @@ public class TcpPeerServer implements PeerServer {
   @Override
   public void setReceiveBufferSize(int size) throws IOException {
     this.serverSocket.setReceiveBufferSize(size);
+  }
+
+  @Override
+  public int getReceiveBufferSize() throws IOException {
+    return this.serverSocket.getReceiveBufferSize();
   }
 
   @Override

@@ -154,7 +154,7 @@ public class TestCombineFileInputFormat {
     @Override
     public BlockLocation[] getFileBlockLocations(
         FileStatus stat, long start, long len) throws IOException {
-      if (stat.isDir()) {
+      if (stat.isDirectory()) {
         return null;
       }
       System.out.println("File " + stat.getPath());
@@ -1772,7 +1772,9 @@ public class TestCombineFileInputFormat {
     // default fs path
     assertEquals(DUMMY_FS_URI, FileSystem.getDefaultUri(conf).toString());
     // add a local file
-    Path localPath = new Path("testFile1");
+    String localPathRoot = System.getProperty("test.build.data",
+        "build/test/data");
+    Path localPath = new Path(localPathRoot, "testFile1");
     FileSystem lfs = FileSystem.getLocal(conf);
     FSDataOutputStream dos = lfs.create(localPath);
     dos.writeChars("Local file for CFIF");

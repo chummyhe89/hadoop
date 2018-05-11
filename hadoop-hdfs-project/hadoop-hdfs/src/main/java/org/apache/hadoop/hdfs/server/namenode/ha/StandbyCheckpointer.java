@@ -28,14 +28,13 @@ import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ha.ServiceFailedException;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.hdfs.server.namenode.CheckpointConf;
+import org.apache.hadoop.hdfs.server.namenode.CheckpointFaultInjector;
 import org.apache.hadoop.hdfs.server.namenode.FSImage;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
@@ -50,6 +49,8 @@ import org.apache.hadoop.security.UserGroupInformation;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Thread which runs inside the NN when it's in Standby state,
@@ -59,12 +60,14 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
  */
 @InterfaceAudience.Private
 public class StandbyCheckpointer {
-  private static final Log LOG = LogFactory.getLog(StandbyCheckpointer.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(StandbyCheckpointer.class);
   private static final long PREVENT_AFTER_CANCEL_MS = 2*60*1000L;
   private final CheckpointConf checkpointConf;
   private final Configuration conf;
   private final FSNamesystem namesystem;
   private long lastCheckpointTime;
+  private long lastUploadTime;
   private final CheckpointerThread thread;
   private final ThreadFactory uploadThreadFactory;
   private List<URL> activeNNAddresses;
@@ -134,8 +137,8 @@ public class StandbyCheckpointer {
 
   public void start() {
     LOG.info("Starting standby checkpoint thread...\n" +
-        "Checkpointing active NN to possible NNs: " + activeNNAddresses + "\n" +
-        "Serving checkpoints at " + myNNAddress);
+        "Checkpointing active NN to possible NNs: {}\n" +
+        "Serving checkpoints at {}", activeNNAddresses, myNNAddress);
     thread.start();
   }
   
@@ -171,12 +174,12 @@ public class StandbyCheckpointer {
       FSImage img = namesystem.getFSImage();
 
       long prevCheckpointTxId = img.getStorage().getMostRecentCheckpointTxId();
-      long thisCheckpointTxId = img.getLastAppliedOrWrittenTxId();
+      long thisCheckpointTxId = img.getCorrectLastAppliedOrWrittenTxId();
       assert thisCheckpointTxId >= prevCheckpointTxId;
       if (thisCheckpointTxId == prevCheckpointTxId) {
         LOG.info("A checkpoint was triggered but the Standby Node has not " +
-            "received any transactions since the last checkpoint at txid " +
-            thisCheckpointTxId + ". Skipping...");
+            "received any transactions since the last checkpoint at txid {}. " +
+            "Skipping...", thisCheckpointTxId);
         return;
       }
 
@@ -196,7 +199,12 @@ public class StandbyCheckpointer {
       // Save the legacy OIV image, if the output dir is defined.
       String outputDir = checkpointConf.getLegacyOivImageDir();
       if (outputDir != null && !outputDir.isEmpty()) {
-        img.saveLegacyOIVImage(namesystem, outputDir, canceler);
+        try {
+          img.saveLegacyOIVImage(namesystem, outputDir, canceler);
+        } catch (IOException ioe) {
+          LOG.warn("Exception encountered while saving legacy OIV image; "
+                  + "continuing with other checkpointing steps", ioe);
+        }
       }
     } finally {
       namesystem.cpUnlock();
@@ -222,7 +230,9 @@ public class StandbyCheckpointer {
       Future<TransferFsImage.TransferResult> upload =
           executor.submit(new Callable<TransferFsImage.TransferResult>() {
             @Override
-            public TransferFsImage.TransferResult call() throws IOException {
+            public TransferFsImage.TransferResult call()
+                throws IOException, InterruptedException {
+              CheckpointFaultInjector.getInstance().duringUploadInProgess();
               return TransferFsImage.uploadImageFromStorage(activeNNAddress, conf, namesystem
                   .getFSImage().getStorage(), imageType, txid, canceler);
             }
@@ -244,18 +254,19 @@ public class StandbyCheckpointer {
         }
 
       } catch (ExecutionException e) {
-        ioe = new IOException("Exception during image upload: " + e.getMessage(),
-            e.getCause());
+        ioe = new IOException("Exception during image upload", e);
         break;
       } catch (InterruptedException e) {
         ie = e;
         break;
       }
     }
-
-    // we are primary if we successfully updated the ANN
-    this.isPrimaryCheckPointer = success;
-
+    if (ie == null && ioe == null) {
+      //Update only when response from remote about success or
+      lastUploadTime = monotonicNow();
+      // we are primary if we successfully updated the ANN
+      this.isPrimaryCheckPointer = success;
+    }
     // cleaner than copying code for multiple catch statements and better than catching all
     // exceptions, so we just handle the ones we expect.
     if (ie != null || ioe != null) {
@@ -313,7 +324,7 @@ public class StandbyCheckpointer {
 
   private long countUncheckpointedTxns() {
     FSImage img = namesystem.getFSImage();
-    return img.getLastAppliedOrWrittenTxId() -
+    return img.getCorrectLastAppliedOrWrittenTxId() -
       img.getStorage().getMostRecentCheckpointTxId();
   }
 
@@ -362,6 +373,7 @@ public class StandbyCheckpointer {
       // Reset checkpoint time so that we don't always checkpoint
       // on startup.
       lastCheckpointTime = monotonicNow();
+      lastUploadTime = monotonicNow();
       while (shouldRun) {
         boolean needRollbackCheckpoint = namesystem.isNeedRollbackFsImage();
         if (!needRollbackCheckpoint) {
@@ -389,15 +401,15 @@ public class StandbyCheckpointer {
           if (needCheckpoint) {
             LOG.info("Triggering a rollback fsimage for rolling upgrade.");
           } else if (uncheckpointed >= checkpointConf.getTxnCount()) {
-            LOG.info("Triggering checkpoint because there have been " + 
-                uncheckpointed + " txns since the last checkpoint, which " +
-                "exceeds the configured threshold " +
-                checkpointConf.getTxnCount());
+            LOG.info("Triggering checkpoint because there have been {} txns " +
+                "since the last checkpoint, " +
+                "which exceeds the configured threshold {}",
+                uncheckpointed, checkpointConf.getTxnCount());
             needCheckpoint = true;
           } else if (secsSinceLast >= checkpointConf.getPeriod()) {
-            LOG.info("Triggering checkpoint because it has been " +
-                secsSinceLast + " seconds since the last checkpoint, which " +
-                "exceeds the configured interval " + checkpointConf.getPeriod());
+            LOG.info("Triggering checkpoint because it has been {} seconds " +
+                "since the last checkpoint, which exceeds the configured " +
+                "interval {}", secsSinceLast, checkpointConf.getPeriod());
             needCheckpoint = true;
           }
 
@@ -414,7 +426,9 @@ public class StandbyCheckpointer {
 
             // on all nodes, we build the checkpoint. However, we only ship the checkpoint if have a
             // rollback request, are the checkpointer, are outside the quiet period.
-            boolean sendRequest = isPrimaryCheckPointer || secsSinceLast >= checkpointConf.getQuietPeriod();
+            final long secsSinceLastUpload = (now - lastUploadTime) / 1000;
+            boolean sendRequest = isPrimaryCheckPointer
+                || secsSinceLastUpload >= checkpointConf.getQuietPeriod();
             doCheckpoint(sendRequest);
 
             // reset needRollbackCheckpoint to false only when we finish a ckpt
@@ -425,9 +439,10 @@ public class StandbyCheckpointer {
               namesystem.setNeedRollbackFsImage(false);
             }
             lastCheckpointTime = now;
+            LOG.info("Checkpoint finished successfully.");
           }
         } catch (SaveNamespaceCancelledException ce) {
-          LOG.info("Checkpoint was cancelled: " + ce.getMessage());
+          LOG.info("Checkpoint was cancelled: {}", ce.getMessage());
           canceledCount++;
         } catch (InterruptedException ie) {
           LOG.info("Interrupted during checkpointing", ie);

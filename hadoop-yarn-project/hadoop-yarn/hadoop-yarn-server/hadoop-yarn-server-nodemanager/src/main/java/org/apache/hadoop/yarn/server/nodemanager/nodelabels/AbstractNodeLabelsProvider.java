@@ -26,17 +26,17 @@ import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.yarn.api.records.NodeLabel;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.nodelabels.CommonNodeLabelsManager;
-
-import com.google.common.annotations.VisibleForTesting;
 
 /**
  * Provides base implementation of NodeLabelsProvider with Timer and expects
  * subclass to provide TimerTask which can fetch NodeLabels
  */
-public abstract class AbstractNodeLabelsProvider extends NodeLabelsProvider {
+public abstract class AbstractNodeLabelsProvider extends AbstractService
+    implements NodeLabelsProvider {
   public static final long DISABLE_NODE_LABELS_PROVIDER_FETCH_TIMER = -1;
 
   // Delay after which timer task are triggered to fetch NodeLabels
@@ -55,8 +55,6 @@ public abstract class AbstractNodeLabelsProvider extends NodeLabelsProvider {
   protected Set<NodeLabel> nodeLabels =
       CommonNodeLabelsManager.EMPTY_NODELABEL_SET;
 
-  @VisibleForTesting
-  long startTime = 0;
 
   public AbstractNodeLabelsProvider(String name) {
     super(name);
@@ -77,12 +75,13 @@ public abstract class AbstractNodeLabelsProvider extends NodeLabelsProvider {
   @Override
   protected void serviceStart() throws Exception {
     timerTask = createTimerTask();
+    timerTask.run();
     if (intervalTime != DISABLE_NODE_LABELS_PROVIDER_FETCH_TIMER) {
       nodeLabelsScheduler =
           new Timer("DistributedNodeLabelsRunner-Timer", true);
       // Start the timer task and then periodically at the configured interval
       // time. Illegal values for intervalTime is handled by timer api
-      nodeLabelsScheduler.scheduleAtFixedRate(timerTask, startTime,
+      nodeLabelsScheduler.scheduleAtFixedRate(timerTask, intervalTime,
           intervalTime);
     }
     super.serviceStart();
@@ -97,8 +96,14 @@ public abstract class AbstractNodeLabelsProvider extends NodeLabelsProvider {
     if (nodeLabelsScheduler != null) {
       nodeLabelsScheduler.cancel();
     }
+    cleanUp();
     super.serviceStop();
   }
+
+  /**
+   * method for subclasses to cleanup.
+   */
+  protected abstract void cleanUp() throws Exception ;
 
   /**
    * @return Returns output from provider.
@@ -122,6 +127,15 @@ public abstract class AbstractNodeLabelsProvider extends NodeLabelsProvider {
     }
   }
 
+  static Set<NodeLabel> convertToNodeLabelSet(String partitionNodeLabel) {
+    if (null == partitionNodeLabel) {
+      return null;
+    }
+    Set<NodeLabel> labels = new HashSet<NodeLabel>();
+    labels.add(NodeLabel.newInstance(partitionNodeLabel));
+    return labels;
+  }
+
   /**
    * Used only by tests to access the timer task directly
    *
@@ -129,17 +143,6 @@ public abstract class AbstractNodeLabelsProvider extends NodeLabelsProvider {
    */
   TimerTask getTimerTask() {
     return timerTask;
-  }
-
-  static Set<NodeLabel> convertToNodeLabelSet(Set<String> nodeLabels) {
-    if (null == nodeLabels) {
-      return null;
-    }
-    Set<NodeLabel> labels = new HashSet<NodeLabel>();
-    for (String label : nodeLabels) {
-      labels.add(NodeLabel.newInstance(label));
-    }
-    return labels;
   }
 
   public abstract TimerTask createTimerTask();

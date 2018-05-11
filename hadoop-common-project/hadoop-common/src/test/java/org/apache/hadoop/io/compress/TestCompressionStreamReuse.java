@@ -24,8 +24,6 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.Random;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.DataInputBuffer;
 import org.apache.hadoop.io.DataOutputBuffer;
@@ -35,26 +33,41 @@ import org.apache.hadoop.io.compress.zlib.ZlibCompressor.CompressionLevel;
 import org.apache.hadoop.io.compress.zlib.ZlibCompressor.CompressionStrategy;
 import org.apache.hadoop.util.ReflectionUtils;
 
-import junit.framework.TestCase;
+import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-public class TestCompressionStreamReuse extends TestCase {
-  private static final Log LOG = LogFactory
-      .getLog(TestCompressionStreamReuse.class);
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeTrue;
+
+public class TestCompressionStreamReuse {
+  private static final Logger LOG = LoggerFactory
+      .getLogger(TestCompressionStreamReuse.class);
 
   private Configuration conf = new Configuration();
   private int count = 10000;
   private int seed = new Random().nextInt();
 
+  @Test
   public void testBZip2Codec() throws IOException {
     resetStateTest(conf, seed, count,
         "org.apache.hadoop.io.compress.BZip2Codec");
   }
 
+  @Test
   public void testGzipCompressStreamReuse() throws IOException {
     resetStateTest(conf, seed, count,
         "org.apache.hadoop.io.compress.GzipCodec");
   }
 
+  @Test
+  public void testZStandardCompressStreamReuse() throws IOException {
+    assumeTrue(ZStandardCodec.isNativeCodeLoaded());
+    resetStateTest(conf, seed, count,
+        "org.apache.hadoop.io.compress.ZStandardCodec");
+  }
+
+  @Test
   public void testGzipCompressStreamReuseWithParam() throws IOException {
     Configuration conf = new Configuration(this.conf);
     ZlibFactory
@@ -65,7 +78,7 @@ public class TestCompressionStreamReuse extends TestCase {
         "org.apache.hadoop.io.compress.GzipCodec");
   }
 
-  private static void resetStateTest(Configuration conf, int seed, int count,
+  private void resetStateTest(Configuration conf, int seed, int count,
       String codecClass) throws IOException {
     // Create the codec
     CompressionCodec codec = null;

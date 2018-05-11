@@ -34,7 +34,6 @@ import java.util.HashMap;
 import java.util.Random;
 
 import org.apache.commons.io.output.NullOutputStream;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileStatus;
@@ -74,7 +73,7 @@ import org.junit.rules.ExpectedException;
  */
 public class TestSnapshot {
   {
-    ((Log4JLogger)INode.LOG).getLogger().setLevel(Level.ALL);
+    GenericTestUtils.setLogLevel(INode.LOG, Level.ALL);
     SnapshotTestHelper.disableLogs();
   }
 
@@ -99,8 +98,8 @@ public class TestSnapshot {
   protected DistributedFileSystem hdfs;
   
   private static final String testDir =
-      System.getProperty("test.build.data", "build/test/data");
-  
+      GenericTestUtils.getTestDir().getAbsolutePath();
+
   @Rule
   public ExpectedException exception = ExpectedException.none();
   
@@ -132,6 +131,7 @@ public class TestSnapshot {
   public void tearDown() throws Exception {
     if (cluster != null) {
       cluster.shutdown();
+      cluster = null;
     }
   }
 
@@ -435,13 +435,13 @@ public class TestSnapshot {
     hdfs.allowSnapshot(root);
     rootNode = fsdir.getINode4Write(root.toString()).asDirectory();
     assertTrue(rootNode.isSnapshottable());
-    assertEquals(DirectorySnapshottableFeature.SNAPSHOT_LIMIT,
+    assertEquals(DirectorySnapshottableFeature.SNAPSHOT_QUOTA_DEFAULT,
         rootNode.getDirectorySnapshottableFeature().getSnapshotQuota());
     // call allowSnapshot again
     hdfs.allowSnapshot(root);
     rootNode = fsdir.getINode4Write(root.toString()).asDirectory();
     assertTrue(rootNode.isSnapshottable());
-    assertEquals(DirectorySnapshottableFeature.SNAPSHOT_LIMIT,
+    assertEquals(DirectorySnapshottableFeature.SNAPSHOT_QUOTA_DEFAULT,
         rootNode.getDirectorySnapshottableFeature().getSnapshotQuota());
     
     // disallowSnapshot on dir

@@ -21,17 +21,18 @@ import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
-import com.google.common.io.Files;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
+import org.apache.hadoop.hdfs.server.common.Util;
 import org.apache.hadoop.hdfs.server.namenode.*;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
 import org.apache.hadoop.hdfs.util.Canceler;
@@ -41,6 +42,7 @@ import org.apache.hadoop.io.compress.GzipCodec;
 import org.apache.hadoop.ipc.StandbyException;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.GenericTestUtils.DelayAnswer;
+import org.apache.hadoop.test.PathUtils;
 import org.apache.hadoop.util.ThreadUtil;
 import org.junit.After;
 import org.junit.Before;
@@ -119,7 +121,8 @@ public class TestStandbyCheckpoints {
   }
 
   protected Configuration setupCommonConfig() {
-    tmpOivImgDir = Files.createTempDir();
+    tmpOivImgDir = GenericTestUtils.getTestDir("TestStandbyCheckpoints");
+    tmpOivImgDir.mkdirs();
 
     Configuration conf = new Configuration();
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_CHECK_PERIOD_KEY, 1);
@@ -139,6 +142,11 @@ public class TestStandbyCheckpoints {
   public void shutdownCluster() throws IOException {
     if (cluster != null) {
       cluster.shutdown();
+      cluster = null;
+    }
+
+    if (tmpOivImgDir != null) {
+      FileUtil.fullyDelete(tmpOivImgDir);
     }
   }
 
@@ -172,6 +180,44 @@ public class TestStandbyCheckpoints {
     // The standby should never try to purge edit logs on shared storage.
     Mockito.verify(standbyJournalSet, Mockito.never()).
       purgeLogsOlderThan(Mockito.anyLong());
+  }
+
+  @Test
+  public void testNewDirInitAfterCheckpointing() throws Exception {
+    File hdfsDir = new File(PathUtils.getTestDir(TestStandbyCheckpoints.class),
+        "testNewDirInitAfterCheckpointing");
+    File nameDir = new File(hdfsDir, "name1");
+    assert nameDir.mkdirs();
+
+    // Restart nn0 with an additional name dir.
+    String existingDir = cluster.getConfiguration(0).
+        get(DFSConfigKeys.DFS_NAMENODE_NAME_DIR_KEY);
+    cluster.getConfiguration(0).set(DFSConfigKeys.DFS_NAMENODE_NAME_DIR_KEY,
+        existingDir + "," + Util.fileAsURI(nameDir).toString());
+    cluster.restartNameNode(0);
+    nns[0] = cluster.getNameNode(0);
+    cluster.transitionToActive(0);
+
+    // "current" is created, but current/VERSION isn't.
+    File currDir = new File(nameDir, "current");
+    File versionFile = new File(currDir, "VERSION");
+    assert currDir.exists();
+    assert !versionFile.exists();
+
+    // Trigger a checkpointing and upload.
+    doEdits(0, 10);
+    HATestUtil.waitForStandbyToCatchUp(nns[0], nns[1]);
+
+    // The version file will be created if a checkpoint is uploaded.
+    // Wait for it to happen up to 10 seconds.
+    for (int i = 0; i < 20; i++) {
+      if (versionFile.exists()) {
+        break;
+      }
+      Thread.sleep(500);
+    }
+    // VERSION must have been created.
+    assert versionFile.exists();
   }
 
   /**
@@ -290,6 +336,11 @@ public class TestStandbyCheckpoints {
    */
   @Test(timeout=60000)
   public void testCheckpointCancellationDuringUpload() throws Exception {
+    // Set dfs.namenode.checkpoint.txns differently on the first NN to avoid it
+    // doing checkpoint when it becomes a standby
+    cluster.getConfiguration(0).setInt(
+        DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_TXNS_KEY, 1000);
+
     // don't compress, we want a big image
     for (int i = 0; i < NUM_NNS; i++) {
       cluster.getConfiguration(i).setBoolean(
@@ -455,6 +506,67 @@ public class TestStandbyCheckpoints {
         answerer.getFireCount() == 1 && answerer.getResultCount() == 1);
     
     t.join();
+  }
+
+  /**
+   * Test for the case standby NNs can upload FSImage to ANN after
+   * become non-primary standby NN. HDFS-9787
+   */
+  @Test(timeout=300000)
+  public void testNonPrimarySBNUploadFSImage() throws Exception {
+    // Shutdown all standby NNs.
+    for (int i = 1; i < NUM_NNS; i++) {
+      cluster.shutdownNameNode(i);
+
+      // Checkpoint as fast as we can, in a tight loop.
+      cluster.getConfiguration(i).setInt(
+        DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_PERIOD_KEY, 1);
+    }
+
+    doEdits(0, 10);
+    cluster.transitionToStandby(0);
+
+    // Standby NNs do checkpoint without active NN available.
+    for (int i = 1; i < NUM_NNS; i++) {
+      cluster.restartNameNode(i, false);
+    }
+    cluster.waitClusterUp();
+
+    for (int i = 0; i < NUM_NNS; i++) {
+      // Once the standby catches up, it should do a checkpoint
+      // and save to local directories.
+      HATestUtil.waitForCheckpoint(cluster, i, ImmutableList.of(12));
+    }
+
+    cluster.transitionToActive(0);
+
+    // Wait for 2 seconds to expire last upload time.
+    Thread.sleep(2000);
+
+    doEdits(11, 20);
+    nns[0].getRpcServer().rollEditLog();
+
+    // One of standby NNs should also upload it back to the active.
+    HATestUtil.waitForCheckpoint(cluster, 0, ImmutableList.of(23));
+  }
+
+  /**
+   * Test that checkpointing is still successful even if an issue
+   * was encountered while writing the legacy OIV image.
+   */
+  @Test(timeout=300000)
+  public void testCheckpointSucceedsWithLegacyOIVException() throws Exception {
+    // Delete the OIV image dir to cause an IOException while saving
+    FileUtil.fullyDelete(tmpOivImgDir);
+
+    doEdits(0, 10);
+    HATestUtil.waitForStandbyToCatchUp(nns[0], nns[1]);
+    // Once the standby catches up, it should notice that it needs to
+    // do a checkpoint and save one to its local directories.
+    HATestUtil.waitForCheckpoint(cluster, 1, ImmutableList.of(12));
+
+    // It should also upload it back to the active.
+    HATestUtil.waitForCheckpoint(cluster, 0, ImmutableList.of(12));
   }
 
   private void doEdits(int start, int stop) throws IOException {

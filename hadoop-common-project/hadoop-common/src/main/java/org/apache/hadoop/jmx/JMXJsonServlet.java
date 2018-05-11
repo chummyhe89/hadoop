@@ -17,11 +17,11 @@
 
 package org.apache.hadoop.jmx;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonGenerator;
 import org.apache.hadoop.http.HttpServer2;
-import org.codehaus.jackson.JsonFactory;
-import org.codehaus.jackson.JsonGenerator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.management.AttributeNotFoundException;
 import javax.management.InstanceNotFoundException;
@@ -115,7 +115,8 @@ import java.util.Set;
  *
  */
 public class JMXJsonServlet extends HttpServlet {
-  private static final Log LOG = LogFactory.getLog(JMXJsonServlet.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(JMXJsonServlet.class);
   static final String ACCESS_CONTROL_ALLOW_METHODS =
       "Access-Control-Allow-Methods";
   static final String ACCESS_CONTROL_ALLOW_ORIGIN =
@@ -147,7 +148,16 @@ public class JMXJsonServlet extends HttpServlet {
     return HttpServer2.isInstrumentationAccessAllowed(getServletContext(),
         request, response);
   }
-  
+
+  /**
+   * Disable TRACE method to avoid TRACE vulnerability.
+   */
+  @Override
+  protected void doTrace(HttpServletRequest req, HttpServletResponse resp)
+      throws ServletException, IOException {
+    resp.sendError(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
+  }
+
   /**
    * Process a GET request for the specified resource.
    * 
@@ -171,7 +181,7 @@ public class JMXJsonServlet extends HttpServlet {
         response.setHeader(ACCESS_CONTROL_ALLOW_METHODS, "GET");
         response.setHeader(ACCESS_CONTROL_ALLOW_ORIGIN, "*");
 
-        jg = jsonFactory.createJsonGenerator(writer);
+        jg = jsonFactory.createGenerator(writer);
         jg.disable(JsonGenerator.Feature.AUTO_CLOSE_TARGET);
         jg.useDefaultPrettyPrinter();
         jg.writeStartObject();

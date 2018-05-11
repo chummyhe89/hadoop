@@ -78,6 +78,7 @@ public class TestInitializeSharedEdits {
   public void shutdownCluster() throws IOException {
     if (cluster != null) {
       cluster.shutdown();
+      cluster = null;
     }
   }
   
@@ -127,7 +128,7 @@ public class TestInitializeSharedEdits {
       HATestUtil.waitForStandbyToCatchUp(cluster.getNameNode(0),
           cluster.getNameNode(1));
       assertTrue(NameNodeAdapter.getFileInfo(cluster.getNameNode(1),
-          newPath.toString(), false).isDir());
+          newPath.toString(), false, false, false).isDirectory());
     } finally {
       if (fs != null) {
         fs.close();

@@ -45,6 +45,9 @@ class JournalMetrics {
   
   @Metric("Number of batches written where this node was lagging")
   MutableCounterLong batchesWrittenWhileLagging;
+
+  @Metric("Number of edit logs downloaded by JournalNodeSyncer")
+  private MutableCounterLong numEditLogsSynced;
   
   private final int[] QUANTILE_INTERVALS = new int[] {
       1*60, // 1m
@@ -109,10 +112,23 @@ class JournalMetrics {
       return -1L;
     }
   }
-  
+
+  @Metric("The timestamp of last successfully written transaction")
+  public long getLastJournalTimestamp() {
+    return journal.getLastJournalTimestamp();
+  }
+
   void addSync(long us) {
     for (MutableQuantiles q : syncsQuantiles) {
       q.add(us);
     }
+  }
+
+  public MutableCounterLong getNumEditLogsSynced() {
+    return numEditLogsSynced;
+  }
+
+  public void incrNumEditLogsSynced() {
+    numEditLogsSynced.incr();
   }
 }

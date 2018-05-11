@@ -27,6 +27,7 @@ import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.junit.Assert;
 import org.junit.Test;
 
+import static org.junit.Assert.assertEquals;
 import static org.mockito.Mockito.*;
 
 public class TestAsyncDispatcher {
@@ -50,7 +51,9 @@ public class TestAsyncDispatcher {
     disp.waitForEventThreadToWait();
     try {
       disp.getEventHandler().handle(event);
+      Assert.fail("Expected YarnRuntimeException");
     } catch (YarnRuntimeException e) {
+      Assert.assertTrue(e.getCause() instanceof InterruptedException);
     }
     // Queue should be empty and dispatcher should not hang on close
     Assert.assertTrue("Event Queue should have been empty",
@@ -74,6 +77,47 @@ public class TestAsyncDispatcher {
     disp.start();
     disp.waitForEventThreadToWait();
     disp.close();
+  }
+
+  @SuppressWarnings("rawtypes")
+  private static class DummyHandler implements EventHandler<Event> {
+    @Override
+    public void handle(Event event) {
+      try {
+        Thread.sleep(500);
+      } catch (InterruptedException e) {}
+    }
+  }
+
+  private enum DummyType {
+    DUMMY
+  }
+
+  @SuppressWarnings({ "rawtypes", "unchecked" })
+  private void dispatchDummyEvents(Dispatcher disp, int count) {
+    for (int i = 0; i < count; i++) {
+      Event event = mock(Event.class);
+      when(event.getType()).thenReturn(DummyType.DUMMY);
+      disp.getEventHandler().handle(event);
+    }
+  }
+
+  // Test if drain dispatcher drains events on stop.
+  @SuppressWarnings({ "rawtypes" })
+  @Test(timeout=10000)
+  public void testDrainDispatcherDrainEventsOnStop() throws Exception {
+    YarnConfiguration conf = new YarnConfiguration();
+    conf.setInt(YarnConfiguration.DISPATCHER_DRAIN_EVENTS_TIMEOUT, 2000);
+    BlockingQueue<Event> queue = new LinkedBlockingQueue<Event>();
+    DrainDispatcher disp = new DrainDispatcher(queue);
+    disp.init(conf);
+    disp.register(DummyType.class, new DummyHandler());
+    disp.setDrainEventsOnStop();
+    disp.start();
+    disp.waitForEventThreadToWait();
+    dispatchDummyEvents(disp, 2);
+    disp.close();
+    assertEquals(0, queue.size());
   }
 }
 

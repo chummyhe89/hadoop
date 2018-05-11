@@ -18,11 +18,13 @@
 
 package org.apache.hadoop.yarn.server.webapp;
 
+import java.io.IOException;
 import java.lang.reflect.UndeclaredThrowableException;
 import java.security.PrivilegedExceptionAction;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
@@ -51,13 +53,13 @@ import org.apache.hadoop.yarn.api.protocolrecords.GetContainersRequest;
 import org.apache.hadoop.yarn.exceptions.ApplicationAttemptNotFoundException;
 import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
 import org.apache.hadoop.yarn.exceptions.ContainerNotFoundException;
+import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.server.webapp.dao.AppAttemptInfo;
 import org.apache.hadoop.yarn.server.webapp.dao.AppAttemptsInfo;
 import org.apache.hadoop.yarn.server.webapp.dao.AppInfo;
 import org.apache.hadoop.yarn.server.webapp.dao.AppsInfo;
 import org.apache.hadoop.yarn.server.webapp.dao.ContainerInfo;
 import org.apache.hadoop.yarn.server.webapp.dao.ContainersInfo;
-import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.webapp.BadRequestException;
 import org.apache.hadoop.yarn.webapp.ForbiddenException;
 import org.apache.hadoop.yarn.webapp.NotFoundException;
@@ -154,18 +156,21 @@ public class WebServices {
       if (callerUGI == null) {
         // TODO: the request should take the params like what RMWebServices does
         // in YARN-1819.
-        appReports = appBaseProt.getApplications(request).getApplicationList();
+        appReports = getApplicationsReport(request);
       } else {
         appReports = callerUGI.doAs(
             new PrivilegedExceptionAction<Collection<ApplicationReport>> () {
           @Override
           public Collection<ApplicationReport> run() throws Exception {
-            return appBaseProt.getApplications(request).getApplicationList();
+            return getApplicationsReport(request);
           }
         });
       }
     } catch (Exception e) {
       rewrapAndThrowException(e);
+    }
+    if (appReports == null) {
+      return allApps;
     }
     for (ApplicationReport appReport : appReports) {
 
@@ -187,7 +192,8 @@ public class WebServices {
         }
       }
       if (queueQuery != null && !queueQuery.isEmpty()) {
-        if (!appReport.getQueue().equals(queueQuery)) {
+        if (appReport.getQueue() == null || !appReport.getQueue()
+            .equals(queueQuery)) {
           continue;
         }
       }
@@ -217,7 +223,7 @@ public class WebServices {
       if (callerUGI == null) {
         GetApplicationReportRequest request =
             GetApplicationReportRequest.newInstance(id);
-        app = appBaseProt.getApplicationReport(request).getApplicationReport();
+        app = getApplicationReport(request);
       } else {
         app = callerUGI.doAs(
             new PrivilegedExceptionAction<ApplicationReport> () {
@@ -225,7 +231,7 @@ public class WebServices {
           public ApplicationReport run() throws Exception {
             GetApplicationReportRequest request =
                 GetApplicationReportRequest.newInstance(id);
-            return appBaseProt.getApplicationReport(request).getApplicationReport();
+            return getApplicationReport(request);
           }
         });
       }
@@ -248,8 +254,7 @@ public class WebServices {
         GetApplicationAttemptsRequest request =
             GetApplicationAttemptsRequest.newInstance(id);
         appAttemptReports =
-            appBaseProt.getApplicationAttempts(request)
-              .getApplicationAttemptList();
+            getApplicationAttemptsReport(request);
       } else {
         appAttemptReports = callerUGI.doAs(
             new PrivilegedExceptionAction<Collection<ApplicationAttemptReport>> () {
@@ -257,8 +262,7 @@ public class WebServices {
           public Collection<ApplicationAttemptReport> run() throws Exception {
             GetApplicationAttemptsRequest request =
                 GetApplicationAttemptsRequest.newInstance(id);
-            return appBaseProt.getApplicationAttempts(request)
-                  .getApplicationAttemptList();
+            return getApplicationAttemptsReport(request);
           }
         });
       }
@@ -266,6 +270,9 @@ public class WebServices {
       rewrapAndThrowException(e);
     }
     AppAttemptsInfo appAttemptsInfo = new AppAttemptsInfo();
+    if (appAttemptReports == null) {
+      return appAttemptsInfo;
+    }
     for (ApplicationAttemptReport appAttemptReport : appAttemptReports) {
       AppAttemptInfo appAttemptInfo = new AppAttemptInfo(appAttemptReport);
       appAttemptsInfo.add(appAttemptInfo);
@@ -286,8 +293,7 @@ public class WebServices {
         GetApplicationAttemptReportRequest request =
             GetApplicationAttemptReportRequest.newInstance(aaid);
         appAttempt =
-            appBaseProt.getApplicationAttemptReport(request)
-              .getApplicationAttemptReport();
+            getApplicationAttemptReport(request);
       } else {
         appAttempt = callerUGI.doAs(
             new PrivilegedExceptionAction<ApplicationAttemptReport> () {
@@ -295,8 +301,7 @@ public class WebServices {
           public ApplicationAttemptReport run() throws Exception {
             GetApplicationAttemptReportRequest request =
                 GetApplicationAttemptReportRequest.newInstance(aaid);
-            return appBaseProt.getApplicationAttemptReport(request)
-                  .getApplicationAttemptReport();
+            return getApplicationAttemptReport(request);
           }
         });
       }
@@ -321,14 +326,14 @@ public class WebServices {
       if (callerUGI == null) {
         GetContainersRequest request = GetContainersRequest.newInstance(aaid);
         containerReports =
-            appBaseProt.getContainers(request).getContainerList();
+            getContainersReport(request);
       } else {
         containerReports = callerUGI.doAs(
             new PrivilegedExceptionAction<Collection<ContainerReport>> () {
           @Override
           public Collection<ContainerReport> run() throws Exception {
             GetContainersRequest request = GetContainersRequest.newInstance(aaid);
-            return appBaseProt.getContainers(request).getContainerList();
+            return getContainersReport(request);
           }
         });
       }
@@ -336,6 +341,9 @@ public class WebServices {
       rewrapAndThrowException(e);
     }
     ContainersInfo containersInfo = new ContainersInfo();
+    if (containerReports == null) {
+      return containersInfo;
+    }
     for (ContainerReport containerReport : containerReports) {
       ContainerInfo containerInfo = new ContainerInfo(containerReport);
       containersInfo.add(containerInfo);
@@ -357,7 +365,7 @@ public class WebServices {
         GetContainerReportRequest request =
             GetContainerReportRequest.newInstance(cid);
         container =
-            appBaseProt.getContainerReport(request).getContainerReport();
+            getContainerReport(request);
       } else {
         container = callerUGI.doAs(
             new PrivilegedExceptionAction<ContainerReport> () {
@@ -365,7 +373,7 @@ public class WebServices {
           public ContainerReport run() throws Exception {
             GetContainerReportRequest request =
                 GetContainerReportRequest.newInstance(cid);
-            return appBaseProt.getContainerReport(request).getContainerReport();
+            return getContainerReport(request);
           }
         });
       }
@@ -379,7 +387,7 @@ public class WebServices {
     return new ContainerInfo(container);
   }
 
-  protected void init(HttpServletResponse response) {
+  protected void initForReadableEndpoints(HttpServletResponse response) {
     // clear content type
     response.setContentType(null);
   }
@@ -420,7 +428,12 @@ public class WebServices {
     if (appId == null || appId.isEmpty()) {
       throw new NotFoundException("appId, " + appId + ", is empty or null");
     }
-    ApplicationId aid = ConverterUtils.toApplicationId(appId);
+    ApplicationId aid = null;
+    try {
+      aid = ApplicationId.fromString(appId);
+    } catch (Exception e) {
+      throw new BadRequestException(e);
+    }
     if (aid == null) {
       throw new NotFoundException("appId is null");
     }
@@ -433,8 +446,12 @@ public class WebServices {
       throw new NotFoundException("appAttemptId, " + appAttemptId
           + ", is empty or null");
     }
-    ApplicationAttemptId aaid =
-        ConverterUtils.toApplicationAttemptId(appAttemptId);
+    ApplicationAttemptId aaid = null;
+    try {
+      aaid = ApplicationAttemptId.fromString(appAttemptId);
+    } catch (Exception e) {
+      throw new BadRequestException(e);
+    }
     if (aaid == null) {
       throw new NotFoundException("appAttemptId is null");
     }
@@ -446,7 +463,12 @@ public class WebServices {
       throw new NotFoundException("containerId, " + containerId
           + ", is empty or null");
     }
-    ContainerId cid = ConverterUtils.toContainerId(containerId);
+    ContainerId cid = null;
+    try {
+      cid = ContainerId.fromString(containerId);
+    } catch (Exception e) {
+      throw new BadRequestException(e);
+    }
     if (cid == null) {
       throw new NotFoundException("containerId is null");
     }
@@ -493,4 +515,36 @@ public class WebServices {
     }
   }
 
+  protected ApplicationReport getApplicationReport(
+      GetApplicationReportRequest request) throws YarnException, IOException {
+    return appBaseProt.getApplicationReport(request).getApplicationReport();
+  }
+
+  protected List<ApplicationReport> getApplicationsReport(
+      final GetApplicationsRequest request) throws YarnException, IOException {
+    return appBaseProt.getApplications(request).getApplicationList();
+  }
+
+  protected ApplicationAttemptReport getApplicationAttemptReport(
+      GetApplicationAttemptReportRequest request)
+      throws YarnException, IOException {
+    return appBaseProt.getApplicationAttemptReport(request)
+        .getApplicationAttemptReport();
+  }
+
+  protected List<ApplicationAttemptReport> getApplicationAttemptsReport(
+      GetApplicationAttemptsRequest request) throws YarnException, IOException {
+    return appBaseProt.getApplicationAttempts(request)
+        .getApplicationAttemptList();
+  }
+
+  protected ContainerReport getContainerReport(
+      GetContainerReportRequest request) throws YarnException, IOException {
+    return appBaseProt.getContainerReport(request).getContainerReport();
+  }
+
+  protected List<ContainerReport> getContainersReport(
+      GetContainersRequest request) throws YarnException, IOException {
+    return appBaseProt.getContainers(request).getContainerList();
+  }
 }

@@ -32,8 +32,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.mapred.ShuffleHandler;
 import org.apache.hadoop.mapreduce.MRJobConfig;
@@ -45,6 +43,8 @@ import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEventType;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.util.concurrent.HadoopThreadPoolExecutor;
+import org.apache.hadoop.yarn.api.protocolrecords.SignalContainerRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.StartContainerRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.StartContainersRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.StartContainersResponse;
@@ -52,11 +52,14 @@ import org.apache.hadoop.yarn.api.protocolrecords.StopContainersRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.StopContainersResponse;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
+import org.apache.hadoop.yarn.api.records.SignalContainerCommand;
 import org.apache.hadoop.yarn.client.api.impl.ContainerManagementProtocolProxy;
 import org.apache.hadoop.yarn.client.api.impl.ContainerManagementProtocolProxy.ContainerManagementProtocolProxyData;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * This class is responsible for launching of containers.
@@ -64,7 +67,8 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
 public class ContainerLauncherImpl extends AbstractService implements
     ContainerLauncher {
 
-  static final Log LOG = LogFactory.getLog(ContainerLauncherImpl.class);
+  static final Logger LOG =
+      LoggerFactory.getLogger(ContainerLauncherImpl.class);
 
   private ConcurrentHashMap<ContainerId, Container> containers = 
     new ConcurrentHashMap<ContainerId, Container>(); 
@@ -99,7 +103,7 @@ public class ContainerLauncherImpl extends AbstractService implements
     }
   }
   
-  private static enum ContainerState {
+  private enum ContainerState {
     PREP, FAILED, RUNNING, DONE, KILLED_BEFORE_LAUNCH
   }
 
@@ -190,9 +194,13 @@ public class ContainerLauncherImpl extends AbstractService implements
         }
       }
     }
-    
+
+    public void kill() {
+      kill(false);
+    }
+
     @SuppressWarnings("unchecked")
-    public synchronized void kill() {
+    public synchronized void kill(boolean dumpThreads) {
 
       if(this.state == ContainerState.PREP) {
         this.state = ContainerState.KILLED_BEFORE_LAUNCH;
@@ -202,6 +210,13 @@ public class ContainerLauncherImpl extends AbstractService implements
         ContainerManagementProtocolProxyData proxy = null;
         try {
           proxy = getCMProxy(this.containerMgrAddress, this.containerID);
+
+          if (dumpThreads) {
+            final SignalContainerRequest request = SignalContainerRequest
+                .newInstance(containerID,
+                    SignalContainerCommand.OUTPUT_THREAD_DUMP);
+            proxy.getContainerManagementProtocol().signalToContainer(request);
+          }
 
           // kill the remote container if already launched
           List<ContainerId> ids = new ArrayList<ContainerId>();
@@ -266,7 +281,7 @@ public class ContainerLauncherImpl extends AbstractService implements
         "ContainerLauncher #%d").setDaemon(true).build();
 
     // Start with a default core-pool size of 10 and change it dynamically.
-    launcherPool = new ThreadPoolExecutor(initialPoolSize,
+    launcherPool = new HadoopThreadPoolExecutor(initialPoolSize,
         Integer.MAX_VALUE, 1, TimeUnit.HOURS,
         new LinkedBlockingQueue<Runnable>(),
         tf);
@@ -380,7 +395,7 @@ public class ContainerLauncherImpl extends AbstractService implements
         break;
 
       case CONTAINER_REMOTE_CLEANUP:
-        c.kill();
+        c.kill(event.getDumpContainerThreads());
         break;
 
       case CONTAINER_COMPLETED:

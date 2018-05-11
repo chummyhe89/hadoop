@@ -50,11 +50,12 @@ import org.apache.hadoop.fs.CacheFlag;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileSystemTestHelper;
+import org.apache.hadoop.fs.FsTracer;
 import org.apache.hadoop.fs.InvalidRequestException;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.hdfs.BlockReaderTestUtil;
+import org.apache.hadoop.hdfs.client.impl.BlockReaderTestUtil;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
@@ -71,7 +72,7 @@ import org.apache.hadoop.hdfs.protocol.CachePoolStats;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
-import org.apache.hadoop.hdfs.server.blockmanagement.CacheReplicationMonitor;
+import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor.CachedBlocksList.Type;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeManager;
@@ -85,14 +86,11 @@ import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.GSet;
-import org.apache.log4j.Level;
-import org.apache.log4j.LogManager;
-import org.apache.log4j.Logger;
-import org.apache.htrace.Sampler;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 import com.google.common.base.Supplier;
 
@@ -158,6 +156,7 @@ public class TestCacheDirectives {
     waitForCachedBlocks(namenode, 0, 0, "teardown");
     if (cluster != null) {
       cluster.shutdown();
+      cluster = null;
     }
     // Restore the original CacheManipulator
     NativeIO.POSIX.setCacheManipulator(prevCacheManipulator);
@@ -421,6 +420,9 @@ public class TestCacheDirectives {
         setMode(new FsPermission((short)0777)));
     proto.addCachePool(new CachePoolInfo("pool4").
         setMode(new FsPermission((short)0)));
+    proto.addCachePool(new CachePoolInfo("pool5").
+        setMode(new FsPermission((short)0007))
+        .setOwnerName(unprivilegedUser.getShortUserName()));
 
     CacheDirectiveInfo alpha = new CacheDirectiveInfo.Builder().
         setPath(new Path("/alpha")).
@@ -488,6 +490,18 @@ public class TestCacheDirectives {
     }
 
     long deltaId = addAsUnprivileged(delta);
+
+    try {
+      addAsUnprivileged(new CacheDirectiveInfo.Builder().
+          setPath(new Path("/epsilon")).
+          setPool("pool5").
+          build());
+      fail("expected an error when adding to a pool with " +
+          "mode 007 (no permissions for pool owner).");
+    } catch (AccessControlException e) {
+      GenericTestUtils.
+          assertExceptionContains("Permission denied while accessing pool", e);
+    }
 
     // We expect the following to succeed, because DistributedFileSystem
     // qualifies the path.
@@ -967,7 +981,7 @@ public class TestCacheDirectives {
 
     // Uncache and check each path in sequence
     RemoteIterator<CacheDirectiveEntry> entries =
-      new CacheDirectiveIterator(nnRpc, null, Sampler.NEVER);
+      new CacheDirectiveIterator(nnRpc, null, FsTracer.get(conf));
     for (int i=0; i<numFiles; i++) {
       CacheDirectiveEntry entry = entries.next();
       nnRpc.removeCacheDirective(entry.getInfo().getId());
@@ -1469,6 +1483,7 @@ public class TestCacheDirectives {
    */
   private void checkPendingCachedEmpty(MiniDFSCluster cluster)
       throws Exception {
+    Thread.sleep(1000);
     cluster.getNamesystem().readLock();
     try {
       final DatanodeManager datanodeManager =
@@ -1500,7 +1515,6 @@ public class TestCacheDirectives {
     waitForCachedBlocks(namenode, -1, numCachedReplicas,
         "testExceeds:1");
     checkPendingCachedEmpty(cluster);
-    Thread.sleep(1000);
     checkPendingCachedEmpty(cluster);
 
     // Try creating a file with giant-sized blocks that exceed cache capacity
@@ -1508,7 +1522,6 @@ public class TestCacheDirectives {
     DFSTestUtil.createFile(dfs, fileName, 4096, fileLen, CACHE_CAPACITY * 2,
         (short) 1, 0xFADED);
     checkPendingCachedEmpty(cluster);
-    Thread.sleep(1000);
     checkPendingCachedEmpty(cluster);
   }
 
@@ -1534,5 +1547,13 @@ public class TestCacheDirectives {
     } finally {
       DataNodeTestUtils.setCacheReportsDisabledForTests(cluster, false);
     }
+  }
+
+  @Test
+  public void testNoLookupsWhenNotUsed() throws Exception {
+    CacheManager cm = cluster.getNamesystem().getCacheManager();
+    LocatedBlocks locations = Mockito.mock(LocatedBlocks.class);
+    cm.setCachedLocations(locations);
+    Mockito.verifyZeroInteractions(locations);
   }
 }

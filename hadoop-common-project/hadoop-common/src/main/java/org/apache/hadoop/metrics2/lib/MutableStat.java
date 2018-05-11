@@ -41,6 +41,7 @@ public class MutableStat extends MutableMetric {
   private final MetricsInfo iMaxInfo;
   private final MetricsInfo minInfo;
   private final MetricsInfo maxInfo;
+  private final MetricsInfo iNumInfo;
 
   private final SampleStat intervalStat = new SampleStat();
   private final SampleStat prevStat = new SampleStat();
@@ -65,6 +66,8 @@ public class MutableStat extends MutableMetric {
     String lsName = StringUtils.uncapitalize(sampleName);
     String lvName = StringUtils.uncapitalize(valueName);
     numInfo = info(ucName +"Num"+ usName, "Number of "+ lsName +" for "+ desc);
+    iNumInfo = info(ucName +"INum"+ usName,
+                    "Interval number of "+ lsName +" for "+ desc);
     avgInfo = info(ucName +"Avg"+ uvName, "Average "+ lvName +" for "+ desc);
     stdevInfo = info(ucName +"Stdev"+ uvName,
                      "Standard deviation of "+ lvName +" for "+ desc);
@@ -99,6 +102,10 @@ public class MutableStat extends MutableMetric {
 
   /**
    * Add a number of samples and their sum to the running stat
+   *
+   * Note that although use of this method will preserve accurate mean values,
+   * large values for numSamples may result in inaccurate variance values due
+   * to the use of a single step of the Welford method for variance calculation.
    * @param numSamples  number of samples
    * @param sum of the samples
    */
@@ -128,7 +135,8 @@ public class MutableStat extends MutableMetric {
                .addGauge(iMinInfo, lastStat().min())
                .addGauge(iMaxInfo, lastStat().max())
                .addGauge(minInfo, minMax.min())
-               .addGauge(maxInfo, minMax.max());
+               .addGauge(maxInfo, minMax.max())
+               .addGauge(iNumInfo, lastStat().numSamples());
       }
       if (changed()) {
         if (numSamples > 0) {

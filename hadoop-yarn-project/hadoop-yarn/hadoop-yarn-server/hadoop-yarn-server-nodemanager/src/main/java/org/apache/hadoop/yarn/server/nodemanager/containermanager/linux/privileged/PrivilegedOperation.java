@@ -50,7 +50,13 @@ public class PrivilegedOperation {
     TC_READ_STATE("--tc-read-state"),
     TC_READ_STATS("--tc-read-stats"),
     ADD_PID_TO_CGROUP(""), //no CLI switch supported yet.
-    RUN_DOCKER_CMD("--run-docker");
+    RUN_DOCKER_CMD("--run-docker"),
+    GPU("--module-gpu"),
+    FPGA("--module-fpga"),
+    LIST_AS_USER(""), // no CLI switch supported yet.
+    ADD_NUMA_PARAMS(""), // no CLI switch supported yet.
+    REMOVE_DOCKER_CONTAINER("--remove-docker-container"),
+    INSPECT_DOCKER_CONTAINER("--inspect-docker-container");
 
     private final String option;
 
@@ -68,10 +74,16 @@ public class PrivilegedOperation {
 
   private final OperationType opType;
   private final List<String> args;
+  private boolean failureLogging;
 
-  public PrivilegedOperation(OperationType opType, String arg) {
+  public PrivilegedOperation(OperationType opType) {
     this.opType = opType;
     this.args = new ArrayList<String>();
+    this.failureLogging = true;
+  }
+
+  public PrivilegedOperation(OperationType opType, String arg) {
+    this(opType);
 
     if (arg != null) {
       this.args.add(arg);
@@ -79,8 +91,7 @@ public class PrivilegedOperation {
   }
 
   public PrivilegedOperation(OperationType opType, List<String> args) {
-    this.opType = opType;
-    this.args = new ArrayList<String>();
+    this(opType);
 
     if (args != null) {
       this.args.addAll(args);
@@ -95,6 +106,18 @@ public class PrivilegedOperation {
 
   public void appendArgs(List<String> args) {
     this.args.addAll(args);
+  }
+
+  public void enableFailureLogging() {
+    this.failureLogging = true;
+  }
+
+  public void disableFailureLogging() {
+    this.failureLogging = false;
+  }
+
+  public boolean isFailureLoggingEnabled() {
+    return failureLogging;
   }
 
   public OperationType getOperationType() {
@@ -129,7 +152,8 @@ public class PrivilegedOperation {
     LAUNCH_CONTAINER(1),
     SIGNAL_CONTAINER(2),
     DELETE_AS_USER(3),
-    LAUNCH_DOCKER_CONTAINER(4);
+    LAUNCH_DOCKER_CONTAINER(4),
+    LIST_AS_USER(5);
 
     private int value;
     RunAsUserCommand(int value) {

@@ -17,7 +17,6 @@
  */
 package org.apache.hadoop.hdfs;
 
-import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.concurrent.Callable;
@@ -26,7 +25,8 @@ import java.util.concurrent.TimeUnit;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.crypto.key.KeyProvider;
-import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
+import org.apache.hadoop.util.KMSUtil;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.Cache;
@@ -37,10 +37,13 @@ import com.google.common.cache.RemovalNotification;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nonnull;
+
 @InterfaceAudience.Private
 public class KeyProviderCache {
 
-  public static final Logger LOG = LoggerFactory.getLogger(KeyProviderCache.class);
+  public static final Logger LOG = LoggerFactory.getLogger(
+      KeyProviderCache.class);
 
   private final Cache<URI, KeyProvider> cache;
 
@@ -50,45 +53,45 @@ public class KeyProviderCache {
         .removalListener(new RemovalListener<URI, KeyProvider>() {
           @Override
           public void onRemoval(
-              RemovalNotification<URI, KeyProvider> notification) {
+              @Nonnull RemovalNotification<URI, KeyProvider> notification) {
             try {
+              assert notification.getValue() != null;
               notification.getValue().close();
             } catch (Throwable e) {
               LOG.error(
                   "Error closing KeyProvider with uri ["
                       + notification.getKey() + "]", e);
-              ;
             }
           }
         })
         .build();
   }
 
-  public KeyProvider get(final Configuration conf) {
-    URI kpURI = createKeyProviderURI(conf);
-    if (kpURI == null) {
+  public KeyProvider get(final Configuration conf,
+      final URI serverProviderUri) {
+    if (serverProviderUri == null) {
       return null;
     }
     try {
-      return cache.get(kpURI, new Callable<KeyProvider>() {
+      return cache.get(serverProviderUri, new Callable<KeyProvider>() {
         @Override
         public KeyProvider call() throws Exception {
-          return DFSUtilClient.createKeyProvider(conf);
+          return KMSUtil.createKeyProviderFromUri(conf, serverProviderUri);
         }
       });
     } catch (Exception e) {
-      LOG.error("Could not create KeyProvider for DFSClient !!", e.getCause());
+      LOG.error("Could not create KeyProvider for DFSClient !!", e);
       return null;
     }
   }
 
   private URI createKeyProviderURI(Configuration conf) {
-    final String providerUriStr =
-        conf.getTrimmed(HdfsClientConfigKeys.DFS_ENCRYPTION_KEY_PROVIDER_URI, "");
+    final String providerUriStr = conf.getTrimmed(
+        CommonConfigurationKeysPublic.HADOOP_SECURITY_KEY_PROVIDER_PATH);
     // No provider set in conf
-    if (providerUriStr.isEmpty()) {
+    if (providerUriStr == null || providerUriStr.isEmpty()) {
       LOG.error("Could not find uri with key ["
-          + HdfsClientConfigKeys.DFS_ENCRYPTION_KEY_PROVIDER_URI
+          + CommonConfigurationKeysPublic.HADOOP_SECURITY_KEY_PROVIDER_PATH
           + "] to create a keyProvider !!");
       return null;
     }
@@ -104,9 +107,9 @@ public class KeyProviderCache {
   }
 
   @VisibleForTesting
-  public void setKeyProvider(Configuration conf, KeyProvider keyProvider)
-      throws IOException {
+  public void setKeyProvider(Configuration conf, KeyProvider keyProvider) {
     URI uri = createKeyProviderURI(conf);
+    assert uri != null;
     cache.put(uri, keyProvider);
   }
 }

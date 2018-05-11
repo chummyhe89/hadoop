@@ -99,10 +99,12 @@ public class TestRefreshUserMappings {
   public void tearDown() throws Exception {
     if(cluster!=null) {
       cluster.shutdown();
+      cluster = null;
     }
     if(tempResource!=null) {
       File f = new File(tempResource);
       f.delete();
+      tempResource = null;
     }
   }
     
@@ -149,9 +151,13 @@ public class TestRefreshUserMappings {
   @Test
   public void testRefreshSuperUserGroupsConfiguration() throws Exception {
     final String SUPER_USER = "super_user";
-    final String [] GROUP_NAMES1 = new String [] {"gr1" , "gr2"};
-    final String [] GROUP_NAMES2 = new String [] {"gr3" , "gr4"};
-    
+    final List<String> groupNames1 = new ArrayList<>();
+    groupNames1.add("gr1");
+    groupNames1.add("gr2");
+    final List<String> groupNames2 = new ArrayList<>();
+    groupNames2.add("gr3");
+    groupNames2.add("gr4");
+
     //keys in conf
     String userKeyGroups = DefaultImpersonationProvider.getTestProvider().
         getProxySuperuserGroupConfKey(SUPER_USER);
@@ -176,12 +182,12 @@ public class TestRefreshUserMappings {
     
     when(ugi1.getUserName()).thenReturn("userL1");
     when(ugi2.getUserName()).thenReturn("userL2");
-   
+
     // set groups for users
-    when(ugi1.getGroupNames()).thenReturn(GROUP_NAMES1);
-    when(ugi2.getGroupNames()).thenReturn(GROUP_NAMES2);
-   
-    
+    when(ugi1.getGroups()).thenReturn(groupNames1);
+    when(ugi2.getGroups()).thenReturn(groupNames2);
+
+
     // check before
     try {
       ProxyUsers.authorize(ugi1, "127.0.0.1");
@@ -202,7 +208,8 @@ public class TestRefreshUserMappings {
     // add additional resource with the new value
     // so the server side will pick it up
     String rsrc = "testGroupMappingRefresh_rsrc.xml";
-    addNewConfigResource(rsrc, userKeyGroups, "gr2", userKeyHosts, "127.0.0.1");  
+    tempResource = addNewConfigResource(rsrc, userKeyGroups, "gr2",
+        userKeyHosts, "127.0.0.1");
     
     DFSAdmin admin = new DFSAdmin(config);
     String [] args = new String[]{"-refreshSuperUserGroupsConfiguration"};
@@ -226,7 +233,7 @@ public class TestRefreshUserMappings {
     
   }
 
-  private void addNewConfigResource(String rsrcName, String keyGroup,
+  public static String addNewConfigResource(String rsrcName, String keyGroup,
       String groups, String keyHosts, String hosts)
           throws FileNotFoundException, UnsupportedEncodingException {
     // location for temp resource should be in CLASSPATH
@@ -236,17 +243,18 @@ public class TestRefreshUserMappings {
     String urlPath = URLDecoder.decode(url.getPath().toString(), "UTF-8");
     Path p = new Path(urlPath);
     Path dir = p.getParent();
-    tempResource = dir.toString() + "/" + rsrcName;
+    String tmp = dir.toString() + "/" + rsrcName;
 
     String newResource =
     "<configuration>"+
     "<property><name>" + keyGroup + "</name><value>"+groups+"</value></property>" +
     "<property><name>" + keyHosts + "</name><value>"+hosts+"</value></property>" +
     "</configuration>";
-    PrintWriter writer = new PrintWriter(new FileOutputStream(tempResource));
+    PrintWriter writer = new PrintWriter(new FileOutputStream(tmp));
     writer.println(newResource);
     writer.close();
 
     Configuration.addDefaultResource(rsrcName);
+    return tmp;
   }
 }

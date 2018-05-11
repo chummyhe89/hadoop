@@ -84,6 +84,7 @@ public class TestSnapshotBlocksMap {
   public void tearDown() throws Exception {
     if (cluster != null) {
       cluster.shutdown();
+      cluster = null;
     }
   }
 
@@ -281,7 +282,7 @@ public class TestSnapshotBlocksMap {
     ExtendedBlock previous = new ExtendedBlock(fsn.getBlockPoolId(), blks[0]);
     cluster.getNameNodeRpc()
         .addBlock(bar.toString(), hdfs.getClient().getClientName(), previous,
-            null, barNode.getId(), null);
+            null, barNode.getId(), null, null);
 
     SnapshotTestHelper.createSnapshot(hdfs, foo, "s1");
 
@@ -318,7 +319,7 @@ public class TestSnapshotBlocksMap {
     ExtendedBlock previous = new ExtendedBlock(fsn.getBlockPoolId(), blks[0]);
     cluster.getNameNodeRpc()
         .addBlock(bar.toString(), hdfs.getClient().getClientName(), previous,
-            null, barNode.getId(), null);
+            null, barNode.getId(), null, null);
 
     SnapshotTestHelper.createSnapshot(hdfs, foo, "s1");
 
@@ -357,7 +358,7 @@ public class TestSnapshotBlocksMap {
     ExtendedBlock previous = new ExtendedBlock(fsn.getBlockPoolId(), blks[0]);
     cluster.getNameNodeRpc()
         .addBlock(bar.toString(), hdfs.getClient().getClientName(), previous,
-            null, barNode.getId(), null);
+            null, barNode.getId(), null, null);
 
     SnapshotTestHelper.createSnapshot(hdfs, foo, "s1");
 

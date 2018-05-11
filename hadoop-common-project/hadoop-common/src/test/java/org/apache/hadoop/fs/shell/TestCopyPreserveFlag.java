@@ -26,6 +26,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileSystemTestHelper;
 import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsAction;
@@ -33,6 +34,7 @@ import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.shell.CopyCommands.Cp;
 import org.apache.hadoop.fs.shell.CopyCommands.Get;
 import org.apache.hadoop.fs.shell.CopyCommands.Put;
+import org.apache.hadoop.fs.shell.CopyCommands.CopyFromLocal;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -59,9 +61,7 @@ public class TestCopyPreserveFlag {
     conf = new Configuration(false);
     conf.set("fs.file.impl", LocalFileSystem.class.getName());
     fs = FileSystem.getLocal(conf);
-    testDir = new Path(
-        System.getProperty("test.build.data", "build/test/data") + "/testStat"
-    );
+    testDir = new FileSystemTestHelper().getTestRootPath(fs);
     // don't want scheme on the path, just an absolute path
     testDir = new Path(fs.makeQualified(testDir).toUri().getPath());
 
@@ -77,10 +77,10 @@ public class TestCopyPreserveFlag {
         output.writeChar('\n');
     }
     output.close();
-    fs.setTimes(FROM, MODIFICATION_TIME, ACCESS_TIME);
     fs.setPermission(FROM, PERMISSIONS);
-    fs.setTimes(DIR_FROM, MODIFICATION_TIME, ACCESS_TIME);
+    fs.setTimes(FROM, MODIFICATION_TIME, ACCESS_TIME);
     fs.setPermission(DIR_FROM, PERMISSIONS);
+    fs.setTimes(DIR_FROM, MODIFICATION_TIME, ACCESS_TIME);
   }
 
   @After
@@ -118,6 +118,24 @@ public class TestCopyPreserveFlag {
   public void testPutWithoutP() throws Exception {
     run(new Put(), FROM.toString(), TO.toString());
     assertAttributesChanged(TO);
+  }
+
+  @Test(timeout = 10000)
+  public void testCopyFromLocal() throws Exception {
+    run(new CopyFromLocal(), FROM.toString(), TO.toString());
+    assertAttributesChanged(TO);
+  }
+
+  @Test(timeout = 10000)
+  public void testCopyFromLocalWithThreads() throws Exception {
+    run(new CopyFromLocal(), "-t", "10", FROM.toString(), TO.toString());
+    assertAttributesChanged(TO);
+  }
+
+  @Test(timeout = 10000)
+  public void testCopyFromLocalWithThreadsPreserve() throws Exception {
+    run(new CopyFromLocal(), "-p", "-t", "10", FROM.toString(), TO.toString());
+    assertAttributesPreserved(TO);
   }
 
   @Test(timeout = 10000)

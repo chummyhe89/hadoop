@@ -24,8 +24,6 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -45,6 +43,7 @@ import org.apache.hadoop.mapreduce.v2.util.MRWebAppUtil;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.service.Service;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.JarFinder;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
@@ -52,6 +51,8 @@ import org.apache.hadoop.yarn.server.MiniYARNCluster;
 import org.apache.hadoop.yarn.server.nodemanager.ContainerExecutor;
 import org.apache.hadoop.yarn.server.nodemanager.DefaultContainerExecutor;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Configures and starts the MR-specific components in the YARN cluster.
@@ -63,9 +64,11 @@ public class MiniMRYarnCluster extends MiniYARNCluster {
 
   public static final String APPJAR = JarFinder.getJar(LocalContainerLauncher.class);
 
-  private static final Log LOG = LogFactory.getLog(MiniMRYarnCluster.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(MiniMRYarnCluster.class);
   private JobHistoryServer historyServer;
   private JobHistoryServerWrapper historyServerWrapper;
+  private static final String TIMELINE_AUX_SERVICE_NAME = "timeline_collector";
 
   public MiniMRYarnCluster(String testName) {
     this(testName, 1);
@@ -74,7 +77,7 @@ public class MiniMRYarnCluster extends MiniYARNCluster {
   public MiniMRYarnCluster(String testName, int noOfNMs) {
     this(testName, noOfNMs, false);
   }
-
+  @Deprecated
   public MiniMRYarnCluster(String testName, int noOfNMs, boolean enableAHS) {
     super(testName, 1, noOfNMs, 4, 4, enableAHS);
     historyServerWrapper = new JobHistoryServerWrapper();
@@ -167,8 +170,25 @@ public class MiniMRYarnCluster extends MiniYARNCluster {
     conf.set(MRConfig.MASTER_ADDRESS, "test"); // The default is local because of
                                              // which shuffle doesn't happen
     //configure the shuffle service in NM
-    conf.setStrings(YarnConfiguration.NM_AUX_SERVICES,
-        new String[] { ShuffleHandler.MAPREDUCE_SHUFFLE_SERVICEID });
+    String[] nmAuxServices = conf.getStrings(YarnConfiguration.NM_AUX_SERVICES);
+    // if need to enable TIMELINE_AUX_SERVICE_NAME
+    boolean enableTimelineAuxService = false;
+    if (nmAuxServices != null) {
+      for (String nmAuxService: nmAuxServices) {
+        if (nmAuxService.equals(TIMELINE_AUX_SERVICE_NAME)) {
+          enableTimelineAuxService = true;
+          break;
+        }
+      }
+    }
+    if (enableTimelineAuxService) {
+      conf.setStrings(YarnConfiguration.NM_AUX_SERVICES,
+          new String[] {ShuffleHandler.MAPREDUCE_SHUFFLE_SERVICEID,
+              TIMELINE_AUX_SERVICE_NAME});
+    } else {
+      conf.setStrings(YarnConfiguration.NM_AUX_SERVICES,
+          new String[] {ShuffleHandler.MAPREDUCE_SHUFFLE_SERVICEID});
+    }
     conf.setClass(String.format(YarnConfiguration.NM_AUX_SERVICE_FMT,
         ShuffleHandler.MAPREDUCE_SHUFFLE_SERVICEID), ShuffleHandler.class,
         Service.class);
@@ -186,10 +206,32 @@ public class MiniMRYarnCluster extends MiniYARNCluster {
     super.serviceInit(conf);
   }
 
+  @Override
+  protected void serviceStart() throws Exception {
+    super.serviceStart();
+
+    //need to do this because historyServer.init creates a new Configuration
+    getConfig().set(JHAdminConfig.MR_HISTORY_ADDRESS,
+                    historyServer.getConfig().get(JHAdminConfig.MR_HISTORY_ADDRESS));
+    MRWebAppUtil.setJHSWebappURLWithoutScheme(getConfig(),
+        MRWebAppUtil.getJHSWebappURLWithoutScheme(historyServer.getConfig()));
+
+    LOG.info("MiniMRYARN ResourceManager address: " +
+        getConfig().get(YarnConfiguration.RM_ADDRESS));
+    LOG.info("MiniMRYARN ResourceManager web address: " +
+        WebAppUtils.getRMWebAppURLWithoutScheme(getConfig()));
+    LOG.info("MiniMRYARN HistoryServer address: " +
+        getConfig().get(JHAdminConfig.MR_HISTORY_ADDRESS));
+    LOG.info("MiniMRYARN HistoryServer web address: " +
+        getResolvedMRHistoryWebAppURLWithoutScheme(getConfig(),
+            MRWebAppUtil.getJHSHttpPolicy() == HttpConfig.Policy.HTTPS_ONLY));
+  }
+
   private class JobHistoryServerWrapper extends AbstractService {
     public JobHistoryServerWrapper() {
       super(JobHistoryServerWrapper.class.getName());
     }
+    private volatile boolean jhsStarted = false;
 
     @Override
     public synchronized void serviceStart() throws Exception {
@@ -211,13 +253,12 @@ public class MiniMRYarnCluster extends MiniYARNCluster {
         new Thread() {
           public void run() {
             historyServer.start();
+            jhsStarted = true;
           };
         }.start();
-        while (historyServer.getServiceState() == STATE.INITED) {
-          LOG.info("Waiting for HistoryServer to start...");
-          Thread.sleep(1500);
-        }
-        //TODO Add a timeout. State.STOPPED check ?
+
+        GenericTestUtils.waitFor(() -> jhsStarted, 1500, 60_000);
+
         if (historyServer.getServiceState() != STATE.STARTED) {
           throw new IOException("HistoryServer failed to start");
         }
@@ -225,21 +266,6 @@ public class MiniMRYarnCluster extends MiniYARNCluster {
       } catch (Throwable t) {
         throw new YarnRuntimeException(t);
       }
-      //need to do this because historyServer.init creates a new Configuration
-      getConfig().set(JHAdminConfig.MR_HISTORY_ADDRESS,
-                      historyServer.getConfig().get(JHAdminConfig.MR_HISTORY_ADDRESS));
-      MRWebAppUtil.setJHSWebappURLWithoutScheme(getConfig(),
-          MRWebAppUtil.getJHSWebappURLWithoutScheme(historyServer.getConfig()));
-
-      LOG.info("MiniMRYARN ResourceManager address: " +
-               getConfig().get(YarnConfiguration.RM_ADDRESS));
-      LOG.info("MiniMRYARN ResourceManager web address: " +
-               WebAppUtils.getRMWebAppURLWithoutScheme(getConfig()));
-      LOG.info("MiniMRYARN HistoryServer address: " +
-               getConfig().get(JHAdminConfig.MR_HISTORY_ADDRESS));
-      LOG.info("MiniMRYARN HistoryServer web address: "
-          + getResolvedMRHistoryWebAppURLWithoutScheme(getConfig(),
-              MRWebAppUtil.getJHSHttpPolicy() == HttpConfig.Policy.HTTPS_ONLY));
     }
 
     @Override

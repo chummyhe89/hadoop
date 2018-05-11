@@ -18,24 +18,27 @@
  */
 package org.apache.hadoop.fs;
 
-import java.io.*;
+import java.io.DataInputStream;
+import java.io.FileDescriptor;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.EnumSet;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.io.ByteBufferPool;
-import org.apache.hadoop.fs.ByteBufferUtil;
 import org.apache.hadoop.util.IdentityHashStore;
 
 /** Utility that wraps a {@link FSInputStream} in a {@link DataInputStream}
- * and buffers input through a {@link BufferedInputStream}. */
+ * and buffers input through a {@link java.io.BufferedInputStream}. */
 @InterfaceAudience.Public
 @InterfaceStability.Stable
 public class FSDataInputStream extends DataInputStream
     implements Seekable, PositionedReadable, 
       ByteBufferReadable, HasFileDescriptor, CanSetDropBehind, CanSetReadahead,
-      HasEnhancedByteBufferAccess, CanUnbuffer {
+      HasEnhancedByteBufferAccess, CanUnbuffer, StreamCapabilities {
   /**
    * Map ByteBuffers that we have handed out to readers to ByteBufferPool 
    * objects
@@ -97,6 +100,7 @@ public class FSDataInputStream extends DataInputStream
    * @param buffer    buffer into which data is read
    * @param offset    offset into the buffer in which data is written
    * @param length    the number of bytes to read
+   * @throws IOException IO problems
    * @throws EOFException If the end of stream is reached while reading.
    *                      If an exception is thrown an undetermined number
    *                      of bytes in the buffer may have been written. 
@@ -223,11 +227,23 @@ public class FSDataInputStream extends DataInputStream
 
   @Override
   public void unbuffer() {
-    try {
-      ((CanUnbuffer)in).unbuffer();
-    } catch (ClassCastException e) {
-      throw new UnsupportedOperationException("this stream does not " +
-          "support unbuffering.");
+    StreamCapabilitiesPolicy.unbuffer(in);
+  }
+
+  @Override
+  public boolean hasCapability(String capability) {
+    if (in instanceof StreamCapabilities) {
+      return ((StreamCapabilities) in).hasCapability(capability);
     }
+    return false;
+  }
+
+  /**
+   * String value. Includes the string value of the inner stream
+   * @return the stream
+   */
+  @Override
+  public String toString() {
+    return super.toString() + ": " + in;
   }
 }

@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hdfs.server.datanode;
 
+import static org.apache.hadoop.test.PlatformAssumptions.assumeNotWindows;
 import static org.junit.Assume.assumeTrue;
 
 import java.io.File;
@@ -27,7 +28,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.ReadOption;
-import org.apache.hadoop.hdfs.BlockReaderTestUtil;
+import org.apache.hadoop.hdfs.client.impl.BlockReaderTestUtil;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
@@ -96,7 +97,8 @@ public class TestFsDatasetCacheRevocation {
    */
   @Test(timeout=120000)
   public void testPinning() throws Exception {
-    assumeTrue(NativeCodeLoader.isNativeCodeLoaded() && !Path.WINDOWS);
+    assumeTrue(NativeCodeLoader.isNativeCodeLoaded());
+    assumeNotWindows();
     Configuration conf = getDefaultConf();
     // Set a really long revocation timeout, so that we won't reach it during
     // this test.
@@ -146,7 +148,8 @@ public class TestFsDatasetCacheRevocation {
    */
   @Test(timeout=120000)
   public void testRevocation() throws Exception {
-    assumeTrue(NativeCodeLoader.isNativeCodeLoaded() && !Path.WINDOWS);
+    assumeTrue(NativeCodeLoader.isNativeCodeLoaded());
+    assumeNotWindows();
     BlockReaderTestUtil.enableHdfsCachingTracing();
     BlockReaderTestUtil.enableShortCircuitShmTracing();
     Configuration conf = getDefaultConf();

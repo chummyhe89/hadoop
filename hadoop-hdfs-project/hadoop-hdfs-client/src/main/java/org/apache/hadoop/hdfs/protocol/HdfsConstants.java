@@ -34,14 +34,25 @@ public final class HdfsConstants {
    * URI Scheme for hdfs://namenode/ URIs.
    */
   public static final String HDFS_URI_SCHEME = "hdfs";
+
+  public static final byte MEMORY_STORAGE_POLICY_ID = 15;
   public static final String MEMORY_STORAGE_POLICY_NAME = "LAZY_PERSIST";
+  public static final byte ALLSSD_STORAGE_POLICY_ID = 12;
   public static final String ALLSSD_STORAGE_POLICY_NAME = "ALL_SSD";
+  public static final byte ONESSD_STORAGE_POLICY_ID = 10;
   public static final String ONESSD_STORAGE_POLICY_NAME = "ONE_SSD";
+  public static final byte HOT_STORAGE_POLICY_ID = 7;
   public static final String HOT_STORAGE_POLICY_NAME = "HOT";
+  public static final byte WARM_STORAGE_POLICY_ID = 5;
   public static final String WARM_STORAGE_POLICY_NAME = "WARM";
+  public static final byte COLD_STORAGE_POLICY_ID = 2;
   public static final String COLD_STORAGE_POLICY_NAME = "COLD";
-  // TODO should be conf injected?
-  public static final int DEFAULT_DATA_SOCKET_SIZE = 128 * 1024;
+  public static final byte PROVIDED_STORAGE_POLICY_ID = 1;
+  public static final String PROVIDED_STORAGE_POLICY_NAME = "PROVIDED";
+
+
+  public static final int DEFAULT_DATA_SOCKET_SIZE = 0;
+
   /**
    * A special path component contained in the path for a snapshot file/dir
    */
@@ -50,6 +61,10 @@ public final class HdfsConstants {
           = Path.SEPARATOR + DOT_SNAPSHOT_DIR;
   public static final String SEPARATOR_DOT_SNAPSHOT_DIR_SEPARATOR
       = Path.SEPARATOR + DOT_SNAPSHOT_DIR + Path.SEPARATOR;
+  public final static String DOT_RESERVED_STRING = ".reserved";
+  public final static String DOT_RESERVED_PATH_PREFIX = Path.SEPARATOR
+      + DOT_RESERVED_STRING;
+  public final static String DOT_INODES_STRING = ".inodes";
 
   /**
    * Generation stamp of blocks that pre-date the introduction
@@ -85,9 +100,32 @@ public final class HdfsConstants {
   //for write pipeline
   public static final int WRITE_TIMEOUT_EXTENSION = 5 * 1000;
 
+  /**
+   * For a HDFS client to write to a file, a lease is granted; During the lease
+   * period, no other client can write to the file. The writing client can
+   * periodically renew the lease. When the file is closed, the lease is
+   * revoked. The lease duration is bound by this soft limit and a
+   * {@link HdfsConstants#LEASE_HARDLIMIT_PERIOD hard limit}. Until the
+   * soft limit expires, the writer has sole write access to the file. If the
+   * soft limit expires and the client fails to close the file or renew the
+   * lease, another client can preempt the lease.
+   */
+  public static final long LEASE_SOFTLIMIT_PERIOD = 60 * 1000;
+  /**
+   * For a HDFS client to write to a file, a lease is granted; During the lease
+   * period, no other client can write to the file. The writing client can
+   * periodically renew the lease. When the file is closed, the lease is
+   * revoked. The lease duration is bound by a
+   * {@link HdfsConstants#LEASE_SOFTLIMIT_PERIOD soft limit} and this hard
+   * limit. If after the hard limit expires and the client has failed to renew
+   * the lease, HDFS assumes that the client has quit and will automatically
+   * close the file on behalf of the writer, and recover the lease.
+   */
+  public static final long LEASE_HARDLIMIT_PERIOD = 60 * LEASE_SOFTLIMIT_PERIOD;
+
   // SafeMode actions
   public enum SafeModeAction {
-    SAFEMODE_LEAVE, SAFEMODE_ENTER, SAFEMODE_GET
+    SAFEMODE_LEAVE, SAFEMODE_ENTER, SAFEMODE_GET, SAFEMODE_FORCE_EXIT
   }
 
   public enum RollingUpgradeAction {
@@ -102,7 +140,7 @@ public final class HdfsConstants {
       }
     }
 
-    /** Covert the given String to a RollingUpgradeAction. */
+    /** Convert the given String to a RollingUpgradeAction. */
     public static RollingUpgradeAction fromString(String s) {
       return MAP.get(StringUtils.toUpperCase(s));
     }
@@ -110,7 +148,14 @@ public final class HdfsConstants {
 
   // type of the datanode report
   public enum DatanodeReportType {
-    ALL, LIVE, DEAD, DECOMMISSIONING
+    ALL, LIVE, DEAD, DECOMMISSIONING, ENTERING_MAINTENANCE, IN_MAINTENANCE
+  }
+
+  /**
+   * Re-encrypt encryption zone actions.
+   */
+  public enum ReencryptAction {
+    CANCEL, START
   }
 
   /* Hidden constructor */

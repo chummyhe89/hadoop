@@ -52,6 +52,11 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final String  IPC_CLIENT_PING_KEY = "ipc.client.ping";
   /** Default value of IPC_CLIENT_PING_KEY */
   public static final boolean IPC_CLIENT_PING_DEFAULT = true;
+  /** Timeout value for RPC client on waiting for response. */
+  public static final String IPC_CLIENT_RPC_TIMEOUT_KEY =
+      "ipc.client.rpc-timeout.ms";
+  /** Default value for IPC_CLIENT_RPC_TIMEOUT_KEY. */
+  public static final int IPC_CLIENT_RPC_TIMEOUT_DEFAULT = 0;
   /** Responses larger than this will be logged */
   public static final String  IPC_SERVER_RPC_MAX_RESPONSE_SIZE_KEY =
     "ipc.server.max.response.size";
@@ -70,11 +75,19 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   /** Default value for IPC_SERVER_RPC_READ_CONNECTION_QUEUE_SIZE */
   public static final int IPC_SERVER_RPC_READ_CONNECTION_QUEUE_SIZE_DEFAULT =
       100;
-      
+
+  /** Max request size a server will accept. */
   public static final String IPC_MAXIMUM_DATA_LENGTH =
       "ipc.maximum.data.length";
-  
+  /** Default value for IPC_MAXIMUM_DATA_LENGTH. */
   public static final int IPC_MAXIMUM_DATA_LENGTH_DEFAULT = 64 * 1024 * 1024;
+
+  /** Max response size a client will accept. */
+  public static final String IPC_MAXIMUM_RESPONSE_LENGTH =
+      "ipc.maximum.response.length";
+  /** Default value for IPC_MAXIMUM_RESPONSE_LENGTH. */
+  public static final int IPC_MAXIMUM_RESPONSE_LENGTH_DEFAULT =
+      128 * 1024 * 1024;
 
   /** How many calls per handler are allowed in the queue. */
   public static final String  IPC_SERVER_HANDLER_QUEUE_SIZE_KEY =
@@ -85,13 +98,21 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   /**
    * CallQueue related settings. These are not used directly, but rather
    * combined with a namespace and port. For instance:
-   * IPC_CALLQUEUE_NAMESPACE + ".8020." + IPC_CALLQUEUE_IMPL_KEY
+   * IPC_NAMESPACE + ".8020." + IPC_CALLQUEUE_IMPL_KEY
    */
-  public static final String IPC_CALLQUEUE_NAMESPACE = "ipc";
+  public static final String IPC_NAMESPACE = "ipc";
   public static final String IPC_CALLQUEUE_IMPL_KEY = "callqueue.impl";
-  public static final String IPC_CALLQUEUE_IDENTITY_PROVIDER_KEY = "identity-provider.impl";
+  public static final String IPC_SCHEDULER_IMPL_KEY = "scheduler.impl";
+  public static final String IPC_IDENTITY_PROVIDER_KEY = "identity-provider.impl";
   public static final String IPC_BACKOFF_ENABLE = "backoff.enable";
   public static final boolean IPC_BACKOFF_ENABLE_DEFAULT = false;
+
+  /**
+   * IPC scheduler priority levels.
+   */
+  public static final String IPC_SCHEDULER_PRIORITY_LEVELS_KEY =
+      "scheduler.priority.levels";
+  public static final int IPC_SCHEDULER_PRIORITY_LEVELS_DEFAULT_KEY = 4;
 
   /** This is for specifying the implementation for the mappings from
    * hostnames to the racks they belong to
@@ -120,6 +141,22 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final int IO_COMPRESSION_CODEC_SNAPPY_BUFFERSIZE_DEFAULT =
       256 * 1024;
 
+  /** ZStandard compression level. */
+  public static final String IO_COMPRESSION_CODEC_ZSTD_LEVEL_KEY =
+      "io.compression.codec.zstd.level";
+
+  /** Default value for IO_COMPRESSION_CODEC_ZSTD_LEVEL_KEY. */
+  public static final int IO_COMPRESSION_CODEC_ZSTD_LEVEL_DEFAULT = 3;
+
+  /** ZStandard buffer size. */
+  public static final String IO_COMPRESSION_CODEC_ZSTD_BUFFER_SIZE_KEY =
+      "io.compression.codec.zstd.buffersize";
+
+  /** ZStandard buffer size a value of 0 means use the recommended zstd
+   * buffer size that the library recommends. */
+  public static final int
+      IO_COMPRESSION_CODEC_ZSTD_BUFFER_SIZE_DEFAULT = 0;
+
   /** Internal buffer size for Lz4 compressor/decompressors */
   public static final String IO_COMPRESSION_CODEC_LZ4_BUFFERSIZE_KEY =
       "io.compression.codec.lz4.buffersize";
@@ -135,6 +172,8 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   /** Default value for IO_COMPRESSION_CODEC_USELZ4HC_KEY */
   public static final boolean IO_COMPRESSION_CODEC_LZ4_USELZ4HC_DEFAULT =
       false;
+
+
 
   /**
    * Service Authorization
@@ -163,6 +202,12 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final String
   HADOOP_SECURITY_SERVICE_AUTHORIZATION_TRACING =
       "security.trace.protocol.acl";
+  public static final String
+      HADOOP_SECURITY_SERVICE_AUTHORIZATION_DATANODE_LIFELINE =
+          "security.datanode.lifeline.protocol.acl";
+  public static final String
+      HADOOP_SECURITY_SERVICE_AUTHORIZATION_RECONFIGURATION =
+      "security.reconfiguration.protocol.acl";
   public static final String 
   SECURITY_HA_SERVICE_PROTOCOL_ACL = "security.ha.service.protocol.acl";
   public static final String 
@@ -179,11 +224,33 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   SECURITY_NAMENODE_PROTOCOL_ACL = "security.namenode.protocol.acl";
   public static final String SECURITY_QJOURNAL_SERVICE_PROTOCOL_ACL =
       "security.qjournal.service.protocol.acl";
+  public static final String SECURITY_INTERQJOURNAL_SERVICE_PROTOCOL_ACL =
+      "security.interqjournal.service.protocol.acl";
   public static final String HADOOP_SECURITY_TOKEN_SERVICE_USE_IP =
       "hadoop.security.token.service.use_ip";
   public static final boolean HADOOP_SECURITY_TOKEN_SERVICE_USE_IP_DEFAULT =
       true;
-  
+
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
+  public static final String HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_ENABLED_KEY =
+      "hadoop.security.dns.log-slow-lookups.enabled";
+  public static final boolean
+      HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_ENABLED_DEFAULT = false;
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
+  public static final String
+      HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_THRESHOLD_MS_KEY =
+      "hadoop.security.dns.log-slow-lookups.threshold.ms";
+  public static final int
+      HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_THRESHOLD_MS_DEFAULT = 1000;
+
   /**
    * HA health monitor and failover controller.
    */
@@ -268,8 +335,15 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final long HADOOP_SECURITY_UID_NAME_CACHE_TIMEOUT_DEFAULT =
     4*60*60; // 4 hours
   
+  public static final String  IPC_CLIENT_ASYNC_CALLS_MAX_KEY =
+      "ipc.client.async.calls.max";
+  public static final int     IPC_CLIENT_ASYNC_CALLS_MAX_DEFAULT = 100;
   public static final String  IPC_CLIENT_FALLBACK_TO_SIMPLE_AUTH_ALLOWED_KEY = "ipc.client.fallback-to-simple-auth-allowed";
   public static final boolean IPC_CLIENT_FALLBACK_TO_SIMPLE_AUTH_ALLOWED_DEFAULT = false;
+
+  public static final String  IPC_CLIENT_BIND_WILDCARD_ADDR_KEY = "ipc.client"
+      + ".bind.wildcard.addr";
+  public static final boolean IPC_CLIENT_BIND_WILDCARD_ADDR_DEFAULT = false;
 
   public static final String IPC_CLIENT_CONNECT_MAX_RETRIES_ON_SASL_KEY =
     "ipc.client.connect.max.retries.on.sasl";
@@ -295,4 +369,28 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final String NFS_EXPORTS_ALLOWED_HOSTS_SEPARATOR = ";";
   public static final String NFS_EXPORTS_ALLOWED_HOSTS_KEY = "nfs.exports.allowed.hosts";
   public static final String NFS_EXPORTS_ALLOWED_HOSTS_KEY_DEFAULT = "* rw";
+
+  // HDFS client HTrace configuration.
+  public static final String  FS_CLIENT_HTRACE_PREFIX = "fs.client.htrace.";
+
+  // Global ZooKeeper configuration keys
+  public static final String ZK_PREFIX = "hadoop.zk.";
+  /** ACL for the ZooKeeper ensemble. */
+  public static final String ZK_ACL = ZK_PREFIX + "acl";
+  public static final String ZK_ACL_DEFAULT = "world:anyone:rwcda";
+  /** Authentication for the ZooKeeper ensemble. */
+  public static final String ZK_AUTH = ZK_PREFIX + "auth";
+
+  /** Address of the ZooKeeper ensemble. */
+  public static final String ZK_ADDRESS = ZK_PREFIX + "address";
+  /** Maximum number of retries for a ZooKeeper operation. */
+  public static final String ZK_NUM_RETRIES = ZK_PREFIX + "num-retries";
+  public static final int    ZK_NUM_RETRIES_DEFAULT = 1000;
+  /** Timeout for a ZooKeeper operation in ZooKeeper in milliseconds. */
+  public static final String ZK_TIMEOUT_MS = ZK_PREFIX + "timeout-ms";
+  public static final int    ZK_TIMEOUT_MS_DEFAULT = 10000;
+  /** How often to retry a ZooKeeper operation  in milliseconds. */
+  public static final String ZK_RETRY_INTERVAL_MS =
+      ZK_PREFIX + "retry-interval-ms";
+  public static final int    ZK_RETRY_INTERVAL_MS_DEFAULT = 1000;
 }

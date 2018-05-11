@@ -17,25 +17,35 @@
  */
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
+import static org.apache.hadoop.test.PlatformAssumptions.assumeNotWindows;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
-import org.mortbay.util.ajax.JSON;
+import org.eclipse.jetty.util.ajax.JSON;
+import org.junit.rules.Timeout;
 
 /**
  * Class for testing {@link BlockStatsMXBean} implementation
@@ -44,9 +54,14 @@ public class TestBlockStatsMXBean {
 
   private MiniDFSCluster cluster;
 
+  @Rule
+  public Timeout globalTimeout = new Timeout(300000);
+
   @Before
   public void setup() throws IOException {
     HdfsConfiguration conf = new HdfsConfiguration();
+    conf.setTimeDuration(DFSConfigKeys.DFS_DATANODE_DISK_CHECK_MIN_GAP_KEY,
+        0, TimeUnit.MILLISECONDS);
     cluster = null;
     StorageType[][] types = new StorageType[6][];
     for (int i=0; i<3; i++) {
@@ -67,6 +82,7 @@ public class TestBlockStatsMXBean {
   public void tearDown() {
     if (cluster != null) {
       cluster.shutdown();
+      cluster = null;
     }
   }
 
@@ -141,5 +157,65 @@ public class TestBlockStatsMXBean {
     assertTrue(typesPresent.contains("ARCHIVE"));
     assertTrue(typesPresent.contains("DISK"));
     assertTrue(typesPresent.contains("RAM_DISK"));
+  }
+
+  @Test
+  public void testStorageTypeStatsWhenStorageFailed() throws Exception {
+    // The test uses DataNodeTestUtils#injectDataDirFailure() to simulate
+    // volume failures which is currently not supported on Windows.
+    assumeNotWindows();
+
+    DFSTestUtil.createFile(cluster.getFileSystem(),
+        new Path("/blockStatsFile1"), 1024, (short) 1, 0L);
+    Map<StorageType, StorageTypeStats> storageTypeStatsMap = cluster
+        .getNamesystem().getBlockManager().getStorageTypeStats();
+
+    StorageTypeStats storageTypeStats = storageTypeStatsMap
+        .get(StorageType.RAM_DISK);
+    assertEquals(6, storageTypeStats.getNodesInService());
+
+    storageTypeStats = storageTypeStatsMap.get(StorageType.DISK);
+    assertEquals(3, storageTypeStats.getNodesInService());
+
+    storageTypeStats = storageTypeStatsMap.get(StorageType.ARCHIVE);
+    assertEquals(3, storageTypeStats.getNodesInService());
+    File dn1ArcVol1 = cluster.getInstanceStorageDir(0, 1);
+    File dn2ArcVol1 = cluster.getInstanceStorageDir(1, 1);
+    File dn3ArcVol1 = cluster.getInstanceStorageDir(2, 1);
+    DataNodeTestUtils.injectDataDirFailure(dn1ArcVol1);
+    DataNodeTestUtils.injectDataDirFailure(dn2ArcVol1);
+    DataNodeTestUtils.injectDataDirFailure(dn3ArcVol1);
+    try {
+      DFSTestUtil.createFile(cluster.getFileSystem(), new Path(
+          "/blockStatsFile2"), 1024, (short) 1, 0L);
+      fail("Should throw exception, becuase no DISK storage available");
+    } catch (Exception e) {
+      assertTrue(e.getMessage().contains(
+          "could only be written to 0 of the 1 minReplication"));
+    }
+    // wait for heartbeat
+    Thread.sleep(6000);
+    storageTypeStatsMap = cluster.getNamesystem().getBlockManager()
+        .getStorageTypeStats();
+    assertFalse("StorageTypeStatsMap should not contain DISK Storage type",
+        storageTypeStatsMap.containsKey(StorageType.DISK));
+    DataNodeTestUtils.restoreDataDirFromFailure(dn1ArcVol1);
+    DataNodeTestUtils.restoreDataDirFromFailure(dn2ArcVol1);
+    DataNodeTestUtils.restoreDataDirFromFailure(dn3ArcVol1);
+    for (int i = 0; i < 3; i++) {
+      cluster.restartDataNode(0, true);
+    }
+    // wait for heartbeat
+    Thread.sleep(6000);
+    storageTypeStatsMap = cluster.getNamesystem().getBlockManager()
+        .getStorageTypeStats();
+    storageTypeStats = storageTypeStatsMap.get(StorageType.RAM_DISK);
+    assertEquals(6, storageTypeStats.getNodesInService());
+
+    storageTypeStats = storageTypeStatsMap.get(StorageType.DISK);
+    assertEquals(3, storageTypeStats.getNodesInService());
+
+    storageTypeStats = storageTypeStatsMap.get(StorageType.ARCHIVE);
+    assertEquals(3, storageTypeStats.getNodesInService());
   }
 }

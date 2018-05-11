@@ -44,11 +44,9 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
-import com.google.common.io.Files;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -109,7 +107,7 @@ import com.google.common.primitives.Ints;
 public class TestCheckpoint {
 
   static {
-    ((Log4JLogger)FSImage.LOG).getLogger().setLevel(Level.ALL);
+    GenericTestUtils.setLogLevel(FSImage.LOG, Level.ALL);
   }
 
   static final Log LOG = LogFactory.getLog(TestCheckpoint.class); 
@@ -510,8 +508,8 @@ public class TestCheckpoint {
       Mockito.reset(faultInjector);
       secondary.shutdown(); // secondary namenode crash!
 
-      // start new instance of secondary and verify that 
-      // a new rollEditLog suceedes inspite of the fact that 
+      // start new instance of secondary and verify that
+      // a new rollEditLog succeeds inspite of the fact that
       // edits.new already exists.
       //
       secondary = startSecondaryNameNode(conf);
@@ -1031,6 +1029,7 @@ public class TestCheckpoint {
    */
   @Test
   public void testCheckpoint() throws IOException {
+    Path tmpDir = new Path("/tmp_tmp");
     Path file1 = new Path("checkpoint.dat");
     Path file2 = new Path("checkpoint2.dat");
     Configuration conf = new HdfsConfiguration();
@@ -1058,6 +1057,11 @@ public class TestCheckpoint {
           replication, seed);
       checkFile(fileSys, file1, replication);
 
+      for(int i=0; i < 1000; i++) {
+        fileSys.mkdirs(tmpDir);
+        fileSys.delete(tmpDir, true);
+      }
+
       //
       // Take a checkpoint
       //
@@ -1082,7 +1086,6 @@ public class TestCheckpoint {
     //
     // Restart cluster and verify that file1 still exist.
     //
-    Path tmpDir = new Path("/tmp_tmp");
     try {
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
           .format(false).build();
@@ -1609,7 +1612,7 @@ public class TestCheckpoint {
       FSNamesystem fsns = cluster.getNamesystem();
       fsns.enterSafeMode(false);
       fsns.saveNamespace(0, 0);
-      fsns.leaveSafeMode();
+      fsns.leaveSafeMode(false);
       
       secondary = startSecondaryNameNode(conf);
 
@@ -2003,7 +2006,7 @@ public class TestCheckpoint {
         .when(dstImage).toColonSeparatedString();
 
       try {
-        TransferFsImage.downloadImageToStorage(fsName, 0, dstImage, false);
+        TransferFsImage.downloadImageToStorage(fsName, 0, dstImage, false, false);
         fail("Storage info was not verified");
       } catch (IOException ioe) {
         String msg = StringUtils.stringifyException(ioe);
@@ -2432,7 +2435,8 @@ public class TestCheckpoint {
   public void testLegacyOivImage() throws Exception {
     MiniDFSCluster cluster = null;
     SecondaryNameNode secondary = null;
-    File tmpDir = Files.createTempDir();
+    File tmpDir = GenericTestUtils.getTestDir("testLegacyOivImage");
+    tmpDir.mkdirs();
     Configuration conf = new HdfsConfiguration();
     conf.set(DFSConfigKeys.DFS_NAMENODE_LEGACY_OIV_IMAGE_DIR_KEY,
         tmpDir.getAbsolutePath());

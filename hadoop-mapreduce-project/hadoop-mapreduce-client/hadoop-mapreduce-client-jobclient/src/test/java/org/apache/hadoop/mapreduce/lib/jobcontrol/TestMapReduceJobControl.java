@@ -22,17 +22,20 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.junit.Assert;
-
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.HadoopTestCase;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.MapReduceTestUtil;
+import org.junit.Assert;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 
 /**
  * This class performs unit test for Job/JobControl classes.
@@ -40,8 +43,8 @@ import org.junit.Test;
  */
 public class TestMapReduceJobControl extends HadoopTestCase {
 
-  public static final Log LOG = 
-      LogFactory.getLog(TestMapReduceJobControl.class.getName());
+  public static final Logger LOG =
+      LoggerFactory.getLogger(TestMapReduceJobControl.class);
 
   static Path rootDataDir = new Path(
     System.getProperty("test.build.data", "."), "TestData");
@@ -92,7 +95,7 @@ public class TestMapReduceJobControl extends HadoopTestCase {
     cjob2 = new ControlledJob(job2, dependingJobs);
 
     Job job3 = MapReduceTestUtil.createCopyJob(conf, outdir_3, 
-	                                   outdir_1, outdir_2);
+                                     outdir_1, outdir_2);
     dependingJobs = new ArrayList<ControlledJob>();
     dependingJobs.add(cjob1);
     dependingJobs.add(cjob2);
@@ -120,7 +123,8 @@ public class TestMapReduceJobControl extends HadoopTestCase {
       } catch (Exception e) {}
     }
   }
-  
+
+  @Test
   public void testJobControlWithFailJob() throws Exception {
     LOG.info("Starting testJobControlWithFailJob");
     Configuration conf = createJobConf();
@@ -144,6 +148,7 @@ public class TestMapReduceJobControl extends HadoopTestCase {
     theControl.stop();
   }
 
+  @Test
   public void testJobControlWithKillJob() throws Exception {
     LOG.info("Starting testJobControlWithKillJob");
 
@@ -182,6 +187,7 @@ public class TestMapReduceJobControl extends HadoopTestCase {
     theControl.stop();
   }
 
+  @Test
   public void testJobControl() throws Exception {
     LOG.info("Starting testJobControl");
 

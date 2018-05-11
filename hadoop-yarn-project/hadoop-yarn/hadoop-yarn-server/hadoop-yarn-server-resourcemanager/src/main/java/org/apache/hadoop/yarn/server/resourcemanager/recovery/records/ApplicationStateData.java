@@ -20,13 +20,16 @@ package org.apache.hadoop.yarn.server.resourcemanager.recovery.records;
 
 import java.util.HashMap;
 import java.util.Map;
+
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Stable;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
+import org.apache.hadoop.ipc.CallerContext;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
+import org.apache.hadoop.yarn.api.records.ApplicationTimeoutType;
 import org.apache.hadoop.yarn.proto.YarnServerResourceManagerRecoveryProtos.ApplicationStateDataProto;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.util.Records;
@@ -43,8 +46,9 @@ public abstract class ApplicationStateData {
   
   public static ApplicationStateData newInstance(long submitTime,
       long startTime, String user,
-      ApplicationSubmissionContext submissionContext,
-      RMAppState state, String diagnostics, long finishTime) {
+      ApplicationSubmissionContext submissionContext, RMAppState state,
+      String diagnostics, long launchTime, long finishTime,
+      CallerContext callerContext) {
     ApplicationStateData appState = Records.newRecord(ApplicationStateData.class);
     appState.setSubmitTime(submitTime);
     appState.setStartTime(startTime);
@@ -52,13 +56,43 @@ public abstract class ApplicationStateData {
     appState.setApplicationSubmissionContext(submissionContext);
     appState.setState(state);
     appState.setDiagnostics(diagnostics);
+    appState.setLaunchTime(launchTime);
     appState.setFinishTime(finishTime);
+    appState.setCallerContext(callerContext);
     return appState;
   }
 
   public static ApplicationStateData newInstance(long submitTime,
+      long startTime, String user,
+      ApplicationSubmissionContext submissionContext, RMAppState state,
+      String diagnostics, long launchTime, long finishTime,
+      CallerContext callerContext,
+      Map<ApplicationTimeoutType, Long> applicationTimeouts) {
+    ApplicationStateData appState =
+        Records.newRecord(ApplicationStateData.class);
+    appState.setSubmitTime(submitTime);
+    appState.setStartTime(startTime);
+    appState.setUser(user);
+    appState.setApplicationSubmissionContext(submissionContext);
+    appState.setState(state);
+    appState.setDiagnostics(diagnostics);
+    appState.setLaunchTime(launchTime);
+    appState.setFinishTime(finishTime);
+    appState.setCallerContext(callerContext);
+    appState.setApplicationTimeouts(applicationTimeouts);
+    return appState;
+  }
+
+  public static ApplicationStateData newInstance(long submitTime,
+      long startTime, ApplicationSubmissionContext context, String user,
+      CallerContext callerContext) {
+    return newInstance(submitTime, startTime, user, context, null, "", 0, 0,
+        callerContext);
+  }
+  
+  public static ApplicationStateData newInstance(long submitTime,
       long startTime, ApplicationSubmissionContext context, String user) {
-    return newInstance(submitTime, startTime, user, context, null, "", 0);
+    return newInstance(submitTime, startTime, context, user, null);
   }
   
   public int getAttemptCount() {
@@ -68,6 +102,16 @@ public abstract class ApplicationStateData {
   public ApplicationAttemptStateData getAttempt(
       ApplicationAttemptId  attemptId) {
     return attempts.get(attemptId);
+  }
+
+  public int getFirstAttemptId() {
+    int min = Integer.MAX_VALUE;
+    for(ApplicationAttemptId attemptId : attempts.keySet()) {
+      if (attemptId.getAttemptId() < min) {
+        min = attemptId.getAttemptId();
+      }
+    }
+    return min == Integer.MAX_VALUE ? 1 : min;
   }
 
   public abstract ApplicationStateDataProto getProto();
@@ -95,6 +139,20 @@ public abstract class ApplicationStateData {
   @Private
   @Unstable
   public abstract void setStartTime(long startTime);
+
+
+
+  /**
+   * Get the <em>launch time</em> of the application.
+   * @return <em>launch time</em> of the application
+   */
+  @Public
+  @Stable
+  public abstract long getLaunchTime();
+
+  @Private
+  @Unstable
+  public abstract void setLaunchTime(long launchTime);
 
   /**
    * The application submitter
@@ -144,4 +202,15 @@ public abstract class ApplicationStateData {
   public abstract long getFinishTime();
 
   public abstract void setFinishTime(long finishTime);
+  
+  public abstract CallerContext getCallerContext();
+  
+  public abstract void setCallerContext(CallerContext callerContext);
+
+  @Public
+  public abstract Map<ApplicationTimeoutType, Long> getApplicationTimeouts();
+
+  @Public
+  public abstract void setApplicationTimeouts(
+      Map<ApplicationTimeoutType, Long> applicationTimeouts);
 }

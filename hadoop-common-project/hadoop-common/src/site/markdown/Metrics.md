@@ -12,29 +12,7 @@
   limitations under the License. See accompanying LICENSE file.
 -->
 
-* [Overview](#Overview)
-* [jvm context](#jvm_context)
-    * [JvmMetrics](#JvmMetrics)
-* [rpc context](#rpc_context)
-    * [rpc](#rpc)
-    * [RetryCache/NameNodeRetryCache](#RetryCacheNameNodeRetryCache)
-* [rpcdetailed context](#rpcdetailed_context)
-    * [rpcdetailed](#rpcdetailed)
-* [dfs context](#dfs_context)
-    * [namenode](#namenode)
-    * [FSNamesystem](#FSNamesystem)
-    * [JournalNode](#JournalNode)
-    * [datanode](#datanode)
-* [yarn context](#yarn_context)
-    * [ClusterMetrics](#ClusterMetrics)
-    * [QueueMetrics](#QueueMetrics)
-    * [NodeManagerMetrics](#NodeManagerMetrics)
-* [ugi context](#ugi_context)
-    * [UgiMetrics](#UgiMetrics)
-* [metricssystem context](#metricssystem_context)
-    * [MetricsSystem](#MetricsSystem)
-* [default context](#default_context)
-    * [StartupProgress](#StartupProgress)
+<!-- MACRO{toc|fromDepth=0|toDepth=3} -->
 
 Overview
 ========
@@ -101,6 +79,7 @@ Each metrics record contains tags such as Hostname and port (number to which ser
 | `RpcAuthorizationSuccesses` | Total number of authorization successes |
 | `NumOpenConnections` | Current number of open connections |
 | `CallQueueLength` | Current length of the call queue |
+| `numDroppedConnections` | Total number of dropped connections |
 | `rpcQueueTime`*num*`sNumOps` | Shows total number of RPC calls (*num* seconds granularity) if `rpc.metrics.quantile.enable` is set to true. *num* is specified by `rpc.metrics.percentiles.intervals`. |
 | `rpcQueueTime`*num*`s50thPercentileLatency` | Shows the 50th percentile of RPC queue time in milliseconds (*num* seconds granularity) if `rpc.metrics.quantile.enable` is set to true. *num* is specified by `rpc.metrics.percentiles.intervals`. |
 | `rpcQueueTime`*num*`s75thPercentileLatency` | Shows the 75th percentile of RPC queue time in milliseconds (*num* seconds granularity) if `rpc.metrics.quantile.enable` is set to true. *num* is specified by `rpc.metrics.percentiles.intervals`. |
@@ -166,6 +145,9 @@ Each metrics record contains tags such as ProcessName, SessionId, and Hostname a
 | `CreateSymlinkOps` | Total number of createSymlink operations |
 | `GetLinkTargetOps` | Total number of getLinkTarget operations |
 | `FilesInGetListingOps` | Total number of files and directories listed by directory listing operations |
+| `SuccessfulReReplications` | Total number of successful block re-replications |
+| `NumTimesReReplicationNotScheduled` | Total number of times that failed to schedule a block re-replication |
+| `TimeoutReReplications` | Total number of timed out block re-replications |
 | `AllowSnapshotOps` | Total number of allowSnapshot operations |
 | `DisallowSnapshotOps` | Total number of disallowSnapshot operations |
 | `CreateSnapshotOps` | Total number of createSnapshot operations |
@@ -178,8 +160,8 @@ Each metrics record contains tags such as ProcessName, SessionId, and Hostname a
 | `SyncsNumOps` | Total number of Journal syncs |
 | `SyncsAvgTime` | Average time of Journal syncs in milliseconds |
 | `TransactionsBatchedInSync` | Total number of Journal transactions batched in sync |
-| `BlockReportNumOps` | Total number of processing block reports from DataNode |
-| `BlockReportAvgTime` | Average time of processing block reports in milliseconds |
+| `StorageBlockReportNumOps` | Total number of processing block reports from individual storages in DataNode |
+| `StorageBlockReportAvgTime` | Average time of processing block reports in milliseconds |
 | `CacheReportNumOps` | Total number of processing cache reports from DataNode |
 | `CacheReportAvgTime` | Average time of processing cache reports in milliseconds |
 | `SafeModeTime` | The interval between FSNameSystem starts and the last time safemode leaves in milliseconds.  (sometimes not equal to the time in SafeMode, see [HDFS-5156](https://issues.apache.org/jira/browse/HDFS-5156)) |
@@ -192,8 +174,13 @@ Each metrics record contains tags such as ProcessName, SessionId, and Hostname a
 | `PutImageNumOps` | Total number of fsimage uploads to SecondaryNameNode |
 | `PutImageAvgTime` | Average fsimage upload time in milliseconds |
 | `TotalFileOps`| Total number of file operations performed |
-| `NNStarted`| NameNode start time |
 | `NNStartedTimeInMillis`| NameNode start time in milliseconds |
+| `GenerateEDEKTimeNumOps` | Total number of generating EDEK |
+| `GenerateEDEKTimeAvgTime` | Average time of generating EDEK in milliseconds |
+| `WarmUpEDEKTimeNumOps` | Total number of warming up EDEK |
+| `WarmUpEDEKTimeAvgTime` | Average time of warming up EDEK in milliseconds |
+| `ResourceCheckTime`*num*`s(50/75/90/95/99)thPercentileLatency` | The 50/75/90/95/99th percentile of NameNode resource check latency in milliseconds. Percentile measurement is off by default, by watching no intervals. The intervals are specified by `dfs.metrics.percentiles.intervals`. |
+| `StorageBlockReport`*num*`s(50/75/90/95/99)thPercentileLatency` | The 50/75/90/95/99th percentile of storage block report latency in milliseconds. Percentile measurement is off by default, by watching no intervals. The intervals are specified by `dfs.metrics.percentiles.intervals`. |
 
 FSNamesystem
 ------------
@@ -231,8 +218,15 @@ Each metrics record contains tags such as HAState and Hostname as additional inf
 | `PendingDataNodeMessageCount` | (HA-only) Current number of pending block-related messages for later processing in the standby NameNode |
 | `MillisSinceLastLoadedEdits` | (HA-only) Time in milliseconds since the last time standby NameNode load edit log. In active NameNode, set to 0 |
 | `BlockCapacity` | Current number of block capacity |
+| `NumLiveDataNodes` | Number of datanodes which are currently live |
+| `NumDeadDataNodes` | Number of datanodes which are currently dead |
+| `NumDecomLiveDataNodes` | Number of datanodes which have been decommissioned and are now live |
+| `NumDecomDeadDataNodes` | Number of datanodes which have been decommissioned and are now dead |
+| `NumDecommissioningDataNodes` | Number of datanodes in decommissioning state |
+| `VolumeFailuresTotal` | Total number of volume failures across all Datanodes |
+| `EstimatedCapacityLostTotal` | An estimate of the total capacity lost due to volume failures |
 | `StaleDataNodes` | Current number of DataNodes marked stale due to delayed heartbeat |
-| `TotalFiles` | Current number of files and directories (same as FilesTotal) |
+| `NumStaleStorages` | Number of storages marked as content stale (after NameNode restart/failover before first block report is received) |
 | `MissingReplOneBlocks` | Current number of missing blocks with replication factor 1 |
 | `NumFilesUnderConstruction` | Current number of files under construction |
 | `NumActiveClients` | Current number of active clients holding lease |
@@ -241,6 +235,13 @@ Each metrics record contains tags such as HAState and Hostname as additional inf
 | `LockQueueLength` | Number of threads waiting to acquire FSNameSystem lock |
 | `TotalSyncCount` | Total number of sync operations performed by edit log |
 | `TotalSyncTimes` | Total number of milliseconds spent by various edit logs in sync operation|
+| `NameDirSize` | NameNode name directories size in bytes |
+| `NumTimedOutPendingReconstructions` | The number of timed out reconstructions. Not the number of unique blocks that timed out. |
+| `NumInMaintenanceLiveDataNodes` | Number of live Datanodes which are in maintenance state |
+| `NumInMaintenanceDeadDataNodes` | Number of dead Datanodes which are in maintenance state |
+| `NumEnteringMaintenanceDataNodes` | Number of Datanodes that are entering the maintenance state |
+| `FSN(Read/Write)Lock`*OperationName*`NumOps` | Total number of acquiring lock by operations |
+| `FSN(Read/Write)Lock`*OperationName*`AvgTime` | Average time of holding the lock by operations in milliseconds |
 
 JournalNode
 -----------
@@ -267,6 +268,24 @@ The server-side metrics for a journal from the JournalNode's perspective. Each m
 | `Syncs3600s90thPercentileLatencyMicros` | The 90th percentile of sync latency in microseconds (1 hour granularity) |
 | `Syncs3600s95thPercentileLatencyMicros` | The 95th percentile of sync latency in microseconds (1 hour granularity) |
 | `Syncs3600s99thPercentileLatencyMicros` | The 99th percentile of sync latency in microseconds (1 hour granularity) |
+| `NumTransactionsBatchedInSync60sNumOps` | Number of times transactions were batched in sync operation (1 minute granularity) |
+| `NumTransactionsBatchedInSync60s50thPercentileLatencyMicros` | The 50th percentile of transactions batched in sync count (1 minute granularity) |
+| `NumTransactionsBatchedInSync60s75thPercentileLatencyMicros` | The 75th percentile of transactions batched in sync count (1 minute granularity) |
+| `NumTransactionsBatchedInSync60s90thPercentileLatencyMicros` | The 90th percentile of transactions batched in sync count (1 minute granularity) |
+| `NumTransactionsBatchedInSync60s95thPercentileLatencyMicros` | The 95th percentile of transactions batched in sync count (1 minute granularity) |
+| `NumTransactionsBatchedInSync60s99thPercentileLatencyMicros` | The 99th percentile of transactions batched in sync count (1 minute granularity) |
+| `NumTransactionsBatchedInSync300sNumOps` | Number of times transactions were batched in sync operation (5 minutes granularity) |
+| `NumTransactionsBatchedInSync300s50thPercentileLatencyMicros` | The 50th percentile of transactions batched in sync count (5 minutes granularity) |
+| `NumTransactionsBatchedInSync300s75thPercentileLatencyMicros` | The 75th percentile of transactions batched in sync count (5 minutes granularity) |
+| `NumTransactionsBatchedInSync300s90thPercentileLatencyMicros` | The 90th percentile of transactions batched in sync count (5 minutes granularity) |
+| `NumTransactionsBatchedInSync300s95thPercentileLatencyMicros` | The 95th percentile of transactions batched in sync count (5 minutes granularity) |
+| `NumTransactionsBatchedInSync300s99thPercentileLatencyMicros` | The 99th percentile of transactions batched in sync count (5 minutes granularity) |
+| `NumTransactionsBatchedInSync3600sNumOps` | Number of times transactions were batched in sync operation (1 hour granularity) |
+| `NumTransactionsBatchedInSync3600s50thPercentileLatencyMicros` | The 50th percentile of transactions batched in sync count (1 hour granularity) |
+| `NumTransactionsBatchedInSync3600s75thPercentileLatencyMicros` | The 75th percentile of transactions batched in sync count (1 hour granularity) |
+| `NumTransactionsBatchedInSync3600s90thPercentileLatencyMicros` | The 90th percentile of transactions batched in sync count (1 hour granularity) |
+| `NumTransactionsBatchedInSync3600s95thPercentileLatencyMicros` | The 95th percentile of transactions batched in sync count (1 hour granularity) |
+| `NumTransactionsBatchedInSync3600s99thPercentileLatencyMicros` | The 99th percentile of transactions batched in sync count (1 hour granularity) |
 | `BatchesWritten` | Total number of batches written since startup |
 | `TxnsWritten` | Total number of transactions written since startup |
 | `BytesWritten` | Total number of bytes written since startup |
@@ -275,6 +294,7 @@ The server-side metrics for a journal from the JournalNode's perspective. Each m
 | `CurrentLagTxns` | The number of transactions that this JournalNode is lagging |
 | `LastWrittenTxId` | The highest transaction id stored on this JournalNode |
 | `LastPromisedEpoch` | The last epoch number which this node has promised not to accept any lower epoch, or 0 if no promises have been made |
+| `LastJournalTimestamp` | The timestamp of last successfully written transaction |
 
 datanode
 --------
@@ -298,6 +318,21 @@ Each metrics record contains tags such as SessionId and Hostname as additional i
 | `WritesFromLocalClient` | Total number of write operations from local client |
 | `WritesFromRemoteClient` | Total number of write operations from remote client |
 | `BlocksGetLocalPathInfo` | Total number of operations to get local path names of blocks |
+| `RamDiskBlocksWrite` | Total number of blocks written to memory |
+| `RamDiskBlocksWriteFallback` | Total number of blocks written to memory but not satisfied (failed-over to disk) |
+| `RamDiskBytesWrite` | Total number of bytes written to memory |
+| `RamDiskBlocksReadHits` | Total number of times a block in memory was read |
+| `RamDiskBlocksEvicted` | Total number of blocks evicted in memory |
+| `RamDiskBlocksEvictedWithoutRead` | Total number of blocks evicted in memory without ever being read from memory |
+| `RamDiskBlocksEvictionWindowMsNumOps` | Number of blocks evicted in memory|
+| `RamDiskBlocksEvictionWindowMsAvgTime` | Average time of blocks in memory before being evicted in milliseconds |
+| `RamDiskBlocksEvictionWindows`*num*`s(50/75/90/95/99)thPercentileLatency` | The 50/75/90/95/99th percentile of latency between memory write and eviction in milliseconds. Percentile measurement is off by default, by watching no intervals. The intervals are specified by `dfs.metrics.percentiles.intervals`. |
+| `RamDiskBlocksLazyPersisted` | Total number of blocks written to disk by lazy writer |
+| `RamDiskBlocksDeletedBeforeLazyPersisted` | Total number of blocks deleted by application before being persisted to disk |
+| `RamDiskBytesLazyPersisted` | Total number of bytes written to disk by lazy writer |
+| `RamDiskBlocksLazyPersistWindowMsNumOps` | Number of blocks written to disk by lazy writer |
+| `RamDiskBlocksLazyPersistWindowMsAvgTime` | Average time of blocks written to disk by lazy writer in milliseconds |
+| `RamDiskBlocksLazyPersistWindows`*num*`s(50/75/90/95/99)thPercentileLatency` | The 50/75/90/95/99th percentile of latency between memory write and disk persist in milliseconds. Percentile measurement is off by default, by watching no intervals. The intervals are specified by `dfs.metrics.percentiles.intervals`. |
 | `FsyncCount` | Total number of fsync |
 | `VolumeFailures` | Total number of volume failures occurred |
 | `ReadBlockOpNumOps` | Total number of read operations |
@@ -312,6 +347,10 @@ Each metrics record contains tags such as SessionId and Hostname as additional i
 | `ReplaceBlockOpAvgTime` | Average time of block replace operations in milliseconds |
 | `HeartbeatsNumOps` | Total number of heartbeats |
 | `HeartbeatsAvgTime` | Average heartbeat time in milliseconds |
+| `HeartbeatsTotalNumOps` | Total number of heartbeats which is a duplicate of HeartbeatsNumOps |
+| `HeartbeatsTotalAvgTime` | Average total heartbeat time in milliseconds |
+| `LifelinesNumOps` | Total number of lifeline messages |
+| `LifelinesAvgTime` | Average lifeline message processing time in milliseconds |
 | `BlockReportsNumOps` | Total number of block report operations |
 | `BlockReportsAvgTime` | Average time of block report operations in milliseconds |
 | `IncrementalBlockReportsNumOps` | Total number of incremental block report operations |
@@ -332,6 +371,89 @@ Each metrics record contains tags such as SessionId and Hostname as additional i
 | `TotalReadTime` | Total number of milliseconds spent on read operation |
 | `RemoteBytesRead` | Number of bytes read by remote clients |
 | `RemoteBytesWritten` | Number of bytes written by remote clients |
+| `BPServiceActorInfo` | The information about a block pool service actor |
+| `BlocksInPendingIBR` | Number of blocks in pending incremental block report (IBR) |
+| `BlocksReceivingInPendingIBR` | Number of blocks at receiving status in pending incremental block report (IBR) |
+| `BlocksReceivedInPendingIBR` | Number of blocks at received status in pending incremental block report (IBR) |
+| `BlocksDeletedInPendingIBR` | Number of blocks at deleted status in pending incremental block report (IBR) |
+| `EcReconstructionTasks` | Total number of erasure coding reconstruction tasks |
+| `EcFailedReconstructionTasks` | Total number of erasure coding failed reconstruction tasks |
+| `EcDecodingTimeNanos` | Total number of nanoseconds spent by decoding tasks |
+| `EcReconstructionBytesRead` | Total number of bytes read by erasure coding worker |
+| `EcReconstructionBytesWritten` | Total number of bytes written by erasure coding worker |
+| `EcReconstructionRemoteBytesRead` | Total number of bytes remote read by erasure coding worker |
+
+FsVolume
+--------
+
+Per-volume metrics contain Datanode Volume IO related statistics. Per-volume
+metrics are off by default. They can be enabled by setting `dfs.datanode
+.fileio.profiling.percentage.fraction` to an integer value between 1 and 100.
+Setting this value to 0 would mean profiling is not enabled. But enabling
+per-volume metrics may have a performance impact. Each metrics record
+contains tags such as Hostname as additional information along with metrics.
+
+| Name | Description |
+|:---- |:---- |
+| `TotalMetadataOperations` | Total number (monotonically increasing) of metadata operations. Metadata operations include stat, list, mkdir, delete, move, open and posix_fadvise. |
+| `MetadataOperationRateNumOps` | The number of metadata operations within an interval time of metric |
+| `MetadataOperationRateAvgTime` | Mean time of metadata operations in milliseconds |
+| `MetadataOperationLatency`*num*`s(50/75/90/95/99)thPercentileLatency` | The 50/75/90/95/99th percentile of metadata operations latency in milliseconds. Percentile measurement is off by default, by watching no intervals. The intervals are specified by `dfs.metrics.percentiles.intervals`. |
+| `TotalDataFileIos` | Total number (monotonically increasing) of data file io operations |
+| `DataFileIoRateNumOps` | The number of data file io operations within an interval time of metric |
+| `DataFileIoRateAvgTime` | Mean time of data file io operations in milliseconds |
+| `DataFileIoLatency`*num*`s(50/75/90/95/99)thPercentileLatency` | The 50/75/90/95/99th percentile of data file io operations latency in milliseconds. Percentile measurement is off by default, by watching no intervals. The intervals are specified by `dfs.metrics.percentiles.intervals`. |
+| `FlushIoRateNumOps` | The number of file flush io operations within an interval time of metric |
+| `FlushIoRateAvgTime` | Mean time of file flush io operations in milliseconds |
+| `FlushIoLatency`*num*`s(50/75/90/95/99)thPercentileLatency` | The 50/75/90/95/99th percentile of file flush io operations latency in milliseconds. Percentile measurement is off by default, by watching no intervals. The intervals are specified by `dfs.metrics.percentiles.intervals`. |
+| `SyncIoRateNumOps` | The number of file sync io operations within an interval time of metric |
+| `SyncIoRateAvgTime` | Mean time of file sync io operations in milliseconds |
+| `SyncIoLatency`*num*`s(50/75/90/95/99)thPercentileLatency` | The 50/75/90/95/99th percentile of file sync io operations latency in milliseconds. Percentile measurement is off by default, by watching no intervals. The intervals are specified by `dfs.metrics.percentiles.intervals`. |
+| `ReadIoRateNumOps` | The number of file read io operations within an interval time of metric |
+| `ReadIoRateAvgTime` | Mean time of file read io operations in milliseconds |
+| `ReadIoLatency`*num*`s(50/75/90/95/99)thPercentileLatency` | The 50/75/90/95/99th percentile of file read io operations latency in milliseconds. Percentile measurement is off by default, by watching no intervals. The intervals are specified by `dfs.metrics.percentiles.intervals`. |
+| `WriteIoRateNumOps` | The number of file write io operations within an interval time of metric |
+| `WriteIoRateAvgTime` | Mean time of file write io operations in milliseconds |
+| `WriteIoLatency`*num*`s(50/75/90/95/99)thPercentileLatency` | The 50/75/90/95/99th percentile of file write io operations latency in milliseconds. Percentile measurement is off by default, by watching no intervals. The intervals are specified by `dfs.metrics.percentiles.intervals`. |
+| `TotalFileIoErrors` | Total number (monotonically increasing) of file io error operations |
+| `FileIoErrorRateNumOps` | The number of file io error operations within an interval time of metric |
+| `FileIoErrorRateAvgTime` | It measures the mean time in milliseconds from the start of an operation to hitting a failure |
+
+RouterRPCMetrics
+----------------
+RouterRPCMetrics shows the statistics of the Router component in Router-based federation.
+
+| Name | Description |
+|:---- |:---- |
+| `ProcessingOp` | Number of operations the Router processed internally |
+| `ProxyOp` | Number of operations the Router proxied to a Namenode |
+| `ProxyOpFailureStandby` | Number of operations to fail to reach NN |
+| `ProxyOpFailureCommunicate` | Number of operations to hit a standby NN |
+| `ProxyOpNotImplemented` | Number of operations not implemented |
+| `RouterFailureStateStore` | Number of failed requests due to State Store unavailable |
+| `RouterFailureReadOnly` | Number of failed requests due to read only mount point |
+| `RouterFailureLocked` | Number of failed requests due to locked path |
+| `RouterFailureSafemode` | Number of failed requests due to safe mode |
+| `ProcessingNumOps` | Number of operations the Router processed internally within an interval time of metric |
+| `ProcessingAvgTime` | Average time for the Router to process operations in nanoseconds |
+| `ProxyNumOps` | Number of times of that the Router to proxy operations to the Namenodes within an interval time of metric |
+| `ProxyAvgTime` | Average time for the Router to proxy operations to the Namenodes in nanoseconds |
+
+StateStoreMetrics
+-----------------
+StateStoreMetrics shows the statistics of the State Store component in Router-based federation.
+
+| Name | Description |
+|:---- |:---- |
+| `ReadsNumOps` | Number of GET transactions for State Store within an interval time of metric |
+| `ReadsAvgTime` | Average time of GET transactions for State Store in milliseconds |
+| `WritesNumOps` | Number of PUT transactions for State Store within an interval time of metric |
+| `WritesAvgTime` | Average time of PUT transactions for State Store in milliseconds |
+| `RemovesNumOps` | Number of REMOVE transactions for State Store within an interval time of metric |
+| `RemovesAvgTime` | Average time of REMOVE transactions for State Store in milliseconds |
+| `FailuresNumOps` | Number of failed transactions for State Store within an interval time of metric |
+| `FailuresAvgTime` | Average time of failed transactions for State Store in milliseconds |
+| `Cache`*BaseRecord*`Size` | Number of store records to cache in State Store |
 
 yarn context
 ============
@@ -344,10 +466,16 @@ ClusterMetrics shows the metrics of the YARN cluster from the ResourceManager's 
 | Name | Description |
 |:---- |:---- |
 | `NumActiveNMs` | Current number of active NodeManagers |
+| `numDecommissioningNMs` | Current number of NodeManagers being decommissioned|
 | `NumDecommissionedNMs` | Current number of decommissioned NodeManagers |
-| `NumLostNMs` | Current number of lost NodeManagers for not sending heartbeats |
+| `NumShutdownNMs` | Current number of NodeManagers shut down gracefully. Note that this does not count NodeManagers that are forcefully killed. |
+| `NumLostNMs` | Current number of lost NodeManagers for not sending heartbeats. |
 | `NumUnhealthyNMs` | Current number of unhealthy NodeManagers |
 | `NumRebootedNMs` | Current number of rebooted NodeManagers |
+| `AMLaunchDelayNumOps` | Total number of AMs launched |
+| `AMLaunchDelayAvgTime` | Average time in milliseconds RM spends to launch AM containers after the AM container is allocated|
+| `AMRegisterDelayNumOps` | Total number of AMs registered  |
+| `AMRegisterDelayAvgTime` | Average time in milliseconds AM spends to register with RM after the AM container gets launched |
 
 QueueMetrics
 ------------
@@ -372,17 +500,22 @@ In `running_`*num* metrics such as `running_0`, you can set the property `yarn.r
 | `AllocatedVCores` | Current allocated CPU in virtual cores |
 | `AllocatedContainers` | Current number of allocated containers |
 | `AggregateContainersAllocated` | Total number of allocated containers |
+| `aggregateNodeLocalContainersAllocated` | Total number of node local containers allocated  |
+| `aggregateRackLocalContainersAllocated` | Total number of rack local containers allocated  |
+| `aggregateOffSwitchContainersAllocated` | Total number of off switch containers allocated |
 | `AggregateContainersReleased` | Total number of released containers |
 | `AvailableMB` | Current available memory in MB |
 | `AvailableVCores` | Current available CPU in virtual cores |
-| `PendingMB` | Current pending memory resource requests in MB that are not yet fulfilled by the scheduler |
-| `PendingVCores` | Current pending CPU allocation requests in virtual cores that are not yet fulfilled by the scheduler |
-| `PendingContainers` | Current pending resource requests that are not yet fulfilled by the scheduler |
+| `PendingMB` | Current memory requests in MB that are pending to be fulfilled by the scheduler |
+| `PendingVCores` | Current CPU requests in virtual cores that are pending to be fulfilled by the scheduler |
+| `PendingContainers` | Current number of containers that are pending to be fulfilled by the scheduler |
 | `ReservedMB` | Current reserved memory in MB |
 | `ReservedVCores` | Current reserved CPU in virtual cores |
 | `ReservedContainers` | Current number of reserved containers |
 | `ActiveUsers` | Current number of active users |
 | `ActiveApplications` | Current number of active applications |
+| `AppAttemptFirstContainerAllocationDelayNumOps` | Total number of first container allocated for all attempts |
+| `AppAttemptFirstContainerAllocationDelayAvgTime` | Average time RM spends to allocate the first container for all attempts. For managed AM, the first container is AM container. So, this indicates the time duration to allocate AM container. For unmanaged AM, this is the time duration to allocate the first container asked by unmanaged AM. |
 | `FairShareMB` | (FairScheduler only) Current fair share of memory in MB |
 | `FairShareVCores` | (FairScheduler only) Current fair share of CPU in virtual cores |
 | `MinShareMB` | (FairScheduler only) Minimum share of memory in MB |
@@ -406,6 +539,65 @@ NodeManagerMetrics shows the statistics of the containers in the node. Each metr
 | `allocatedContainers` | Current number of allocated containers |
 | `allocatedGB` | Current allocated memory in GB |
 | `availableGB` | Current available memory in GB |
+| `allocatedVcores` | Current used vcores|
+| `availableVcores` | Current available vcores |
+| `containerLaunchDuration` | Average time duration in milliseconds NM takes to launch a container|
+| `badLocalDirs` | Current number of bad local directories. Currently, a disk that cannot be read/written/executed by NM process or A disk being full is considered as bad.|
+| `badLogDirs` | Current number of bad log directories. Currently, a disk that cannot be read/written/executed by NM process or A disk being full is considered as bad. |
+| `goodLocalDirsDiskUtilizationPerc` | Current disk utilization percentage across all good local directories |
+| `goodLogDirsDiskUtilizationPerc` | Current disk utilization percentage across all good log directories |
+
+ContainerMetrics
+------------------
+
+ContainerMetrics shows the resource utilization statistics of a container. Each metrics record contains tags such as ContainerPid and Hostname as additional information along with metrics.
+
+| Name | Description |
+|:---- |:---- |
+| `pMemLimitMBs` | Physical memory limit of the container in MB |
+| `vMemLimitMBs` | Virtual memory limit of the container in MB |
+| `vCoreLimit` | CPU limit of the container in number of vcores |
+| `launchDurationMs` | Container launch duration in msec  |
+| `localizationDurationMs` | Container localization duration in msec |
+| `StartTime` | Time in msec when container starts |
+| `FinishTime` | Time in msec when container finishes |
+| `ExitCode` | Container's exit code |
+| `PMemUsageMBsNumUsage` | Total number of physical memory used metrics |
+| `PMemUsageMBsAvgMBs` | Average physical memory used in MB |
+| `PMemUsageMBsStdevMBs` | Standard deviation of the physical memory used in MB |
+| `PMemUsageMBsMinMBs` | Minimum physical memory used in MB |
+| `PMemUsageMBsMaxMBs` | Maximum physical memory used in MB |
+| `PMemUsageMBsIMinMBs` | Minimum physical memory used in MB of current _interval_ (the time of _interval_ is specified by yarn.nodemanager.container-metrics.period-ms) |
+| `PMemUsageMBsIMaxMBs` | Maximum physical memory used in MB of current _interval_ (the time of _interval_ is specified by yarn.nodemanager.container-metrics.period-ms) |
+| `PMemUsageMBsINumUsage` | Total number of physical memory used metrics in current _interval_ (the time of _interval_ is specified by yarn.nodemanager.container-metrics.period-ms) |
+| `PCpuUsagePercentNumUsage` | Total number of physical CPU cores percent used metrics |
+| `PCpuUsagePercentAvgPercents` | Average physical CPU cores percent used |
+| `PCpuUsagePercentStdevPercents` | Standard deviation of physical CPU cores percent used |
+| `PCpuUsagePercentMinPercents` | Minimum physical CPU cores percent used|
+| `PCpuUsagePercentMaxPercents` | Maximum physical CPU cores percent used |
+| `PCpuUsagePercentIMinPercents` | Minimum physical CPU cores percent used in current _interval_ (the time of _interval_ is specified by yarn.nodemanager.container-metrics.period-ms) |
+| `PCpuUsagePercentIMaxPercents` | Maximum physical CPU cores percent used in current _interval_ (the time of _interval_ is specified by yarn.nodemanager.container-metrics.period-ms) |
+| `PCpuUsagePercentINumUsage` | Total number of physical CPU cores used metrics in current _interval_ (the time of _interval_ is specified by yarn.nodemanager.container-metrics.period-ms) |
+| `MilliVcoreUsageNumUsage` | Total number of vcores used metrics |
+| `MilliVcoreUsageAvgMilliVcores` | 1000 times the average vcores used |
+| `MilliVcoreUsageStdevMilliVcores` | 1000 times the standard deviation of vcores used |
+| `MilliVcoreUsageMinMilliVcores` | 1000 times the minimum vcores used |
+| `MilliVcoreUsageMaxMilliVcores` | 1000 times the maximum vcores used |
+| `MilliVcoreUsageIMinMilliVcores` | 1000 times the average vcores used in current _interval_ (the time of _interval_ is specified by yarn.nodemanager.container-metrics.period-ms) |
+| `MilliVcoreUsageIMaxMilliVcores` | 1000 times the maximum vcores used in current _interval_ (the time of _interval_ is specified by yarn.nodemanager.container-metrics.period-ms) |
+| `MilliVcoreUsageINumUsage` | Total number of vcores used metrics in current _interval_ (the time of _interval_ is specified by yarn.nodemanager.container-metrics.period-ms) |
+| `PMemUsageMBHistogramNumUsage` | Total number of physical memory used metrics (1 second granularity) |
+| `PMemUsageMBHistogram50thPercentileMBs` | The 50th percentile of physical memory used in MB (1 second granularity) |
+| `PMemUsageMBHistogram75thPercentileMBs` | The 75th percentile of physical memory used in MB (1 second granularity) |
+| `PMemUsageMBHistogram90thPercentileMBs` | The 90th percentile of physical memory used in MB (1 second granularity) |
+| `PMemUsageMBHistogram95thPercentileMBs` | The 95th percentile of physical memory used in MB (1 second granularity) |
+| `PMemUsageMBHistogram99thPercentileMBs` | The 99th percentile of physical memory used in MB (1 second granularity) |
+| `PCpuUsagePercentHistogramNumUsage` | Total number of physical CPU cores used metrics (1 second granularity) |
+| `PCpuUsagePercentHistogram50thPercentilePercents` | The 50th percentile of physical CPU cores percent used (1 second granularity) |
+| `PCpuUsagePercentHistogram75thPercentilePercents` | The 75th percentile of physical CPU cores percent used (1 second granularity) |
+| `PCpuUsagePercentHistogram90thPercentilePercents` | The 90th percentile of physical CPU cores percent used (1 second granularity) |
+| `PCpuUsagePercentHistogram95thPercentilePercents` | The 95th percentile of physical CPU cores percent used (1 second granularity) |
+| `PCpuUsagePercentHistogram99thPercentilePercents` | The 99th percentile of physical CPU cores percent used (1 second granularity) |
 
 ugi context
 ===========
@@ -470,5 +662,3 @@ StartupProgress metrics shows the statistics of NameNode startup. Four metrics a
 | *phase*`ElapsedTime` | Total elapsed time in the phase in milliseconds |
 | *phase*`Total` | Total number of steps in the phase |
 | *phase*`PercentComplete` | Current rate completed in the phase  (The max value is not 100 but 1.0) |
-
-

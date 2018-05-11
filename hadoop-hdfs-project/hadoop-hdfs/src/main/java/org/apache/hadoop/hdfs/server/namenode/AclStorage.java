@@ -73,11 +73,11 @@ public final class AclStorage {
    *
    * @param child INode newly created child
    */
-  public static void copyINodeDefaultAcl(INode child) {
+  public static boolean copyINodeDefaultAcl(INode child) {
     INodeDirectory parent = child.getParent();
     AclFeature parentAclFeature = parent.getAclFeature();
     if (parentAclFeature == null || !(child.isFile() || child.isDirectory())) {
-      return;
+      return false;
     }
 
     // Split parent's entries into access vs. default.
@@ -88,7 +88,7 @@ public final class AclStorage {
 
     // The parent may have an access ACL but no default ACL.  If so, exit.
     if (parentDefaultEntries.isEmpty()) {
-      return;
+      return false;
     }
 
     // Pre-allocate list size for access entries to copy from parent.
@@ -145,6 +145,7 @@ public final class AclStorage {
     }
 
     child.setPermission(newPerm);
+    return true;
   }
 
   /**
@@ -280,7 +281,8 @@ public final class AclStorage {
       // Only directories may have a default ACL.
       if (!defaultEntries.isEmpty() && !inode.isDirectory()) {
         throw new AclException(
-          "Invalid ACL: only directories may have a default ACL.");
+          "Invalid ACL: only directories may have a default ACL. "
+            + "Path: " + inode.getFullPathName());
       }
 
       // Attach entries to the feature.

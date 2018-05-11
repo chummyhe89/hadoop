@@ -64,8 +64,6 @@ public class RawLocalFileSystem extends FileSystem {
   // Temporary workaround for HADOOP-9652.
   private static boolean useDeprecatedFileStatus = true;
 
-  private FsPermission umask;
-
   @VisibleForTesting
   public static void useStatIfAvailable() {
     useDeprecatedFileStatus = !Stat.isAvailable();
@@ -99,7 +97,6 @@ public class RawLocalFileSystem extends FileSystem {
   public void initialize(URI uri, Configuration conf) throws IOException {
     super.initialize(uri, conf);
     setConf(conf);
-    umask = FsPermission.getUMask(conf);
   }
   
   /*******************************************************
@@ -159,6 +156,8 @@ public class RawLocalFileSystem extends FileSystem {
     
     @Override
     public int read(byte[] b, int off, int len) throws IOException {
+      // parameter check
+      validatePositionedReadArgs(position, b, off, len);
       try {
         int value = fis.read(b, off, len);
         if (value > 0) {
@@ -174,6 +173,12 @@ public class RawLocalFileSystem extends FileSystem {
     @Override
     public int read(long position, byte[] b, int off, int len)
       throws IOException {
+      // parameter check
+      validatePositionedReadArgs(position, b, off, len);
+      if (len == 0) {
+        return 0;
+      }
+
       ByteBuffer bb = ByteBuffer.wrap(b, off, len);
       try {
         int value = fis.getChannel().read(bb, position);
@@ -203,9 +208,7 @@ public class RawLocalFileSystem extends FileSystem {
   
   @Override
   public FSDataInputStream open(Path f, int bufferSize) throws IOException {
-    if (!exists(f)) {
-      throw new FileNotFoundException(f.toString());
-    }
+    getFileStatus(f);
     return new FSDataInputStream(new BufferedFSInputStream(
         new LocalFSFileInputStream(f), bufferSize));
   }
@@ -225,7 +228,7 @@ public class RawLocalFileSystem extends FileSystem {
       if (permission == null) {
         this.fos = new FileOutputStream(file, append);
       } else {
-        permission = permission.applyUMask(umask);
+        permission = permission.applyUMask(FsPermission.getUMask(getConf()));
         if (Shell.WINDOWS && NativeIO.isAvailable()) {
           this.fos = NativeIO.Windows.createFileOutputStreamWithMode(file,
               append, permission.toShort());
@@ -273,9 +276,6 @@ public class RawLocalFileSystem extends FileSystem {
   @Override
   public FSDataOutputStream append(Path f, int bufferSize,
       Progressable progress) throws IOException {
-    if (!exists(f)) {
-      throw new FileNotFoundException("File " + f + " not found");
-    }
     FileStatus status = getFileStatus(f);
     if (status.isDirectory()) {
       throw new IOException("Cannot append to a diretory (=" + f + " )");
@@ -319,7 +319,6 @@ public class RawLocalFileSystem extends FileSystem {
   }
   
   @Override
-  @Deprecated
   public FSDataOutputStream createNonRecursive(Path f, FsPermission permission,
       EnumSet<CreateFlag> flags, int bufferSize, short replication, long blockSize,
       Progressable progress) throws IOException {
@@ -383,17 +382,21 @@ public class RawLocalFileSystem extends FileSystem {
     // platforms (notably Windows) do not provide this behavior, so the Java API
     // call renameTo(dstFile) fails. Delete destination and attempt rename
     // again.
-    if (this.exists(dst)) {
+    try {
       FileStatus sdst = this.getFileStatus(dst);
-      if (sdst.isDirectory() && dstFile.list().length == 0) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Deleting empty destination and renaming " + src + " to " +
-            dst);
-        }
-        if (this.delete(dst, false) && srcFile.renameTo(dstFile)) {
-          return true;
+      String[] dstFileList = dstFile.list();
+      if (dstFileList != null) {
+        if (sdst.isDirectory() && dstFileList.length == 0) {
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("Deleting empty destination and renaming " + src +
+                " to " + dst);
+          }
+          if (this.delete(dst, false) && srcFile.renameTo(dstFile)) {
+            return true;
+          }
         }
       }
+    } catch (FileNotFoundException ignored) {
     }
     return false;
   }
@@ -462,10 +465,7 @@ public class RawLocalFileSystem extends FileSystem {
     }
 
     if (localf.isDirectory()) {
-      String[] names = localf.list();
-      if (names == null) {
-        return null;
-      }
+      String[] names = FileUtil.list(localf);
       results = new FileStatus[names.length];
       int j = 0;
       for (int i = 0; i < names.length; i++) {
@@ -503,7 +503,7 @@ public class RawLocalFileSystem extends FileSystem {
     if (permission == null) {
       permission = FsPermission.getDirDefault();
     }
-    permission = permission.applyUMask(umask);
+    permission = permission.applyUMask(FsPermission.getUMask(getConf()));
     if (Shell.WINDOWS && NativeIO.isAvailable()) {
       try {
         NativeIO.Windows.createDirectoryWithMode(p2f, permission.toShort());
@@ -555,7 +555,7 @@ public class RawLocalFileSystem extends FileSystem {
       }
     }
     if (p2f.exists() && !p2f.isDirectory()) {
-      throw new FileNotFoundException("Destination exists" +
+      throw new FileAlreadyExistsException("Destination exists" +
               " and is not a directory: " + p2f.getCanonicalPath());
     }
     return (parent == null || parent2f.exists() || mkdirs(parent)) &&
@@ -696,11 +696,34 @@ public class RawLocalFileSystem extends FileSystem {
       return super.getGroup();
     }
 
+    /**
+     * Load file permission information (UNIX symbol rwxrwxrwx, sticky bit info).
+     *
+     * To improve peformance, give priority to native stat() call. First try get
+     * permission information by using native JNI call then fall back to use non
+     * native (ProcessBuilder) call in case native lib is not loaded or native
+     * call is not successful
+     */
+    private synchronized void loadPermissionInfo() {
+      if (!isPermissionLoaded() && NativeIO.isAvailable()) {
+        try {
+          loadPermissionInfoByNativeIO();
+        } catch (IOException ex) {
+          LOG.debug("Native call failed", ex);
+        }
+      }
+
+      if (!isPermissionLoaded()) {
+        loadPermissionInfoByNonNativeIO();
+      }
+    }
+
     /// loads permissions, owner, and group from `ls -ld`
-    private void loadPermissionInfo() {
+    @VisibleForTesting
+    void loadPermissionInfoByNonNativeIO() {
       IOException e = null;
       try {
-        String output = FileUtil.execCommand(new File(getPath().toUri()), 
+        String output = FileUtil.execCommand(new File(getPath().toUri()),
             Shell.getGetPermissionCommand());
         StringTokenizer t =
             new StringTokenizer(output, Shell.TOKEN_SEPARATOR_REGEX);
@@ -716,16 +739,16 @@ public class RawLocalFileSystem extends FileSystem {
         t.nextToken();
 
         String owner = t.nextToken();
+        String group = t.nextToken();
         // If on windows domain, token format is DOMAIN\\user and we want to
         // extract only the user name
+        // same as to the group name
         if (Shell.WINDOWS) {
-          int i = owner.indexOf('\\');
-          if (i != -1)
-            owner = owner.substring(i + 1);
+          owner = removeDomain(owner);
+          group = removeDomain(group);
         }
         setOwner(owner);
-
-        setGroup(t.nextToken());
+        setGroup(group);
       } catch (Shell.ExitCodeException ioe) {
         if (ioe.getExitCode() != 1) {
           e = ioe;
@@ -742,6 +765,46 @@ public class RawLocalFileSystem extends FileSystem {
                                      "file permissions : " + 
                                      StringUtils.stringifyException(e));
         }
+      }
+    }
+
+    // In Windows, domain name is added.
+    // For example, given machine name (domain name) dname, user name i, then
+    // the result for user is dname\\i and for group is dname\\None. So we need
+    // remove domain name as follows:
+    // DOMAIN\\user => user, DOMAIN\\group => group
+    private String removeDomain(String str) {
+      int index = str.indexOf("\\");
+      if (index != -1) {
+        str = str.substring(index + 1);
+      }
+      return str;
+    }
+
+    // loads permissions, owner, and group from `ls -ld`
+    // but use JNI to more efficiently get file mode (permission, owner, group)
+    // by calling file stat() in *nix or some similar calls in Windows
+    @VisibleForTesting
+    void loadPermissionInfoByNativeIO() throws IOException {
+      Path path = getPath();
+      String pathName = path.toUri().getPath();
+      // remove leading slash for Windows path
+      if (Shell.WINDOWS && pathName.startsWith("/")) {
+        pathName = pathName.substring(1);
+      }
+      try {
+        NativeIO.POSIX.Stat stat = NativeIO.POSIX.getStat(pathName);
+        String owner = stat.getOwner();
+        String group = stat.getGroup();
+        int mode = stat.getMode();
+        setOwner(owner);
+        setGroup(group);
+        setPermission(new FsPermission(mode));
+      } catch (IOException e) {
+        setOwner(null);
+        setGroup(null);
+        setPermission(null);
+        throw e;
       }
     }
 
